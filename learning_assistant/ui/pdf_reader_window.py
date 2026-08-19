@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -72,6 +72,7 @@ class PdfReaderWindow(QMainWindow):
 
             self._controller_factory = legacy_factory
         self._tabs_by_path: dict[str, PdfReaderTab] = {}
+        self._focus_mode = False
         self.setWindowTitle("LinguaSpark · PDF 阅读模式")
         self.resize(1200, 760)
         self.setMinimumSize(900, 600)
@@ -99,6 +100,9 @@ class PdfReaderWindow(QMainWindow):
         self.compact_button = QPushButton("便捷模式")
         self.compact_button.setObjectName("secondary")
         toolbar.addWidget(self.compact_button)
+        self.focus_button = QPushButton("专注阅读")
+        self.focus_button.setObjectName("secondary")
+        toolbar.addWidget(self.focus_button)
         toolbar.addStretch(1)
         self.zoom_out_button = QToolButton()
         self.zoom_out_button.setText("−")
@@ -158,6 +162,7 @@ class PdfReaderWindow(QMainWindow):
         self.open_button.clicked.connect(lambda: self.open_files())
         self.empty_open_button.clicked.connect(lambda: self.open_files())
         self.compact_button.clicked.connect(self.compact_mode_requested)
+        self.focus_button.clicked.connect(self.enter_focus_mode)
         self.settings_button.clicked.connect(self.settings_requested)
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
         self.zoom_out_button.clicked.connect(lambda: self.adjust_active_zoom(-1))
@@ -245,6 +250,7 @@ class PdfReaderWindow(QMainWindow):
             self.zoom_out_button,
             self.zoom_in_button,
             self.fit_width_button,
+            self.focus_button,
         ):
             control.setEnabled(has_tabs)
         if not has_tabs:
@@ -308,9 +314,36 @@ class PdfReaderWindow(QMainWindow):
         if tab is not None:
             tab.translate_active_selection()
 
+    def enter_focus_mode(self) -> None:
+        if self._focus_mode or self.current_tab() is None:
+            return
+        self._focus_mode = True
+        self.toolbar_widget.hide()
+        self.tab_widget.tabBar().hide()
+        self.showFullScreen()
+
+    def exit_focus_mode(self) -> None:
+        if not self._focus_mode:
+            return
+        self._focus_mode = False
+        self.toolbar_widget.show()
+        self.tab_widget.tabBar().show()
+        self.showMaximized()
+        self.raise_()
+        self.activateWindow()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._focus_mode and event.key() == Qt.Key.Key_Escape:
+            self.exit_focus_mode()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def show_front(self) -> None:
-        self.show()
-        self.showNormal()
+        if self._focus_mode:
+            self.showFullScreen()
+        else:
+            self.showMaximized()
         self.raise_()
         self.activateWindow()
 

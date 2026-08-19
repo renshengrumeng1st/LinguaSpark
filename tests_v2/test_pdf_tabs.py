@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import Qt
 
 from learning_assistant.core.settings import SecretStore, SettingsStore
 from learning_assistant.ui.pdf_reader_window import PdfReaderWindow
@@ -133,3 +134,39 @@ def test_pdf_window_opens_deduplicates_and_closes_independent_tabs(
     assert controllers[1].dispose_calls == 1
     assert window.tab_widget.count() == 0
     assert window.empty_state.isVisibleTo(window.content_stack)
+
+
+def test_pdf_window_maximizes_and_focus_mode_preserves_active_tab(
+    qtbot, tmp_path: Path
+) -> None:
+    path = tmp_path / "focus.pdf"
+    _write_pdf(path, "Focused reading.")
+    window = PdfReaderWindow(_settings(tmp_path), FakePdfController)
+    qtbot.addWidget(window)
+
+    assert not window.focus_button.isEnabled()
+    window.show_front()
+    qtbot.wait(10)
+    assert window.isMaximized()
+    assert window.open_file(path)
+    tab = window.current_tab()
+    tab.translation.setPlainText("preserved translation")
+    tab.pdf_view.set_zoom_factor(1.3)
+
+    window.focus_button.click()
+    qtbot.wait(10)
+
+    assert window.isFullScreen()
+    assert window.toolbar_widget.isHidden()
+    assert window.tab_widget.tabBar().isHidden()
+    assert tab.isVisibleTo(window)
+
+    qtbot.keyClick(window, Qt.Key.Key_Escape)
+    qtbot.wait(10)
+
+    assert window.isMaximized()
+    assert not window.toolbar_widget.isHidden()
+    assert not window.tab_widget.tabBar().isHidden()
+    assert window.current_tab() is tab
+    assert tab.translation.toPlainText() == "preserved translation"
+    assert tab.pdf_view.zoomFactor() == 1.3
