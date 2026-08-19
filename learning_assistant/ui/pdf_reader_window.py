@@ -43,34 +43,13 @@ class PdfReaderWindow(QMainWindow):
 
     def __init__(
         self,
-        settings: SettingsStore | PdfTranslationController,
-        controller_factory: Callable[[], PdfTranslationController] | SettingsStore,
+        settings: SettingsStore,
+        controller_factory: Callable[[], PdfTranslationController],
         parent=None,
     ) -> None:
         super().__init__(parent)
-        if isinstance(settings, SettingsStore):
-            self.settings = settings
-            if not callable(controller_factory):
-                raise TypeError("controller_factory must be callable")
-            self._controller_factory = controller_factory
-        else:
-            # Transitional compatibility for callers using the former signature.
-            initial_controller = settings
-            if not isinstance(controller_factory, SettingsStore):
-                raise TypeError("settings must be a SettingsStore")
-            self.settings = controller_factory
-            pending = [initial_controller]
-
-            def legacy_factory() -> PdfTranslationController:
-                if pending:
-                    return pending.pop()
-                return PdfTranslationController(
-                    self.settings,
-                    initial_controller.repository,
-                    initial_controller.client,
-                )
-
-            self._controller_factory = legacy_factory
+        self.settings = settings
+        self._controller_factory = controller_factory
         self._tabs_by_path: dict[str, PdfReaderTab] = {}
         self._focus_mode = False
         self.setWindowTitle("LinguaSpark · PDF 阅读模式")

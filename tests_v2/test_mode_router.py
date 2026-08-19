@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from learning_assistant.application import (
     ApplicationModeRouter,
     LearningAssistantApplication,
 )
+from learning_assistant.core.settings import SecretStore, SettingsStore
+from learning_assistant.storage.learning_repository import LearningRepository
 
 
 class FakeWindow(QWidget):
@@ -102,17 +104,38 @@ def test_alt_w_falls_back_without_visible_pdf_selection(qtbot):
     assert selection.request_calls == 1
 
 
-def test_window_hotkey_returns_to_mode_chooser():
+def test_window_hotkey_opens_compact_mode_directly():
     calls: list[str] = []
     application = LearningAssistantApplication.__new__(LearningAssistantApplication)
     application.mode_router = SimpleNamespace(
         pdf_window=None,
-        show_chooser=lambda: calls.append("chooser"),
+        show_compact=lambda: calls.append("compact"),
     )
 
     application._hotkey("window")
 
-    assert calls == ["chooser"]
+    assert calls == ["compact"]
+
+
+def test_pdf_controller_factory_shares_one_network_client(qtbot, tmp_path):
+    application = LearningAssistantApplication.__new__(LearningAssistantApplication)
+    application.qt = QApplication.instance()
+    application.settings = SettingsStore(
+        tmp_path / "settings.json",
+        secrets=SecretStore(tmp_path / "secrets.json"),
+        legacy_path=tmp_path / "missing.json",
+    )
+    application.repository = LearningRepository(tmp_path / "learning.sqlite3")
+    application.pdf_client = None
+
+    first = application._create_pdf_controller()
+    second = application._create_pdf_controller()
+
+    assert first is not second
+    assert first.client is second.client
+    assert first.client is application.pdf_client
+    first.dispose()
+    second.dispose()
 
 
 def test_closing_mode_chooser_only_hides_it(qtbot):

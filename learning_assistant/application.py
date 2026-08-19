@@ -15,6 +15,7 @@ from learning_assistant.core.paths import project_root
 from learning_assistant.core.settings import SettingsStore
 from learning_assistant.pdf_controller import PdfTranslationController
 from learning_assistant.services.dictionary import DictionaryRepository
+from learning_assistant.services.pdf_translation import QtPdfTranslationClient
 from learning_assistant.services.selection import GlobalHotkeyService, SelectionService
 from learning_assistant.services.speech import SpeechService
 from learning_assistant.storage.learning_repository import LearningRepository
@@ -89,7 +90,7 @@ class LearningAssistantApplication:
         )
         self.speech = SpeechService(self.settings)
         self.main_window: MainWindow | None = None
-        self.pdf_controller: PdfTranslationController | None = None
+        self.pdf_client: QtPdfTranslationClient | None = None
         self.popup = SelectionPopup(self.controller)
         self.selection = SelectionService()
         self._review_message_active = False
@@ -126,13 +127,19 @@ class LearningAssistantApplication:
         return window
 
     def _create_pdf_window(self) -> PdfReaderWindow:
-        self.pdf_controller = PdfTranslationController(
-            self.settings, self.repository
-        )
-        window = PdfReaderWindow(self.pdf_controller, self.settings)
+        window = PdfReaderWindow(self.settings, self._create_pdf_controller)
         window.compact_mode_requested.connect(self.mode_router.show_compact)
         window.settings_requested.connect(self._open_settings)
         return window
+
+    def _create_pdf_controller(self) -> PdfTranslationController:
+        if self.pdf_client is None:
+            self.pdf_client = QtPdfTranslationClient(self.qt)
+        return PdfTranslationController(
+            self.settings,
+            self.repository,
+            self.pdf_client,
+        )
 
     def _ensure_compact_window(self) -> MainWindow:
         if self.mode_router.compact_window is None:
@@ -224,7 +231,7 @@ class LearningAssistantApplication:
 
     def _hotkey(self, name: str) -> None:
         if name == "window":
-            self.mode_router.show_chooser()
+            self.mode_router.show_compact()
         elif name == "selection":
             pdf_window = self.mode_router.pdf_window
             if (
@@ -285,8 +292,11 @@ class LearningAssistantApplication:
     def quit(self) -> None:
         self.hotkeys.stop()
         self.controller.cancel()
-        if self.pdf_controller is not None:
-            self.pdf_controller.cancel()
+        pdf_window = self.mode_router.pdf_window
+        if pdf_window is not None:
+            pdf_window.close_all_tabs()
+        if self.pdf_client is not None:
+            self.pdf_client.cancel()
         self.speech.close()
         self.tray.hide()
         self.qt.quit()
