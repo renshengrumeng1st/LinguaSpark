@@ -5,9 +5,11 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtTest import QSignalSpy
+from PySide6.QtWidgets import QApplication
 
 
 def _pdf_view_module():
@@ -207,6 +209,139 @@ def test_mouse_drag_extracts_text_from_real_pdf(qtbot, tmp_path: Path) -> None:
         layout = view._layout()
         start = layout.pdf_rect_to_viewport(0, (74, 64, 1, 1), 0).center().toPoint()
         end = layout.pdf_rect_to_viewport(0, (233, 70, 1, 1), 0).center().toPoint()
+
+        qtbot.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(view.viewport(), pos=end)
+        qtbot.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+        assert view.current_selection() is not None
+        assert "First page sentence." in view.current_selection().text
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_drag_near_text_snaps_and_previews_before_release(
+    qtbot, tmp_path: Path
+) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "snap-near-text.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    final_selections = QSignalSpy(view.selection_changed)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        layout = view._layout()
+        start = layout.pdf_rect_to_viewport(0, (66, 55, 1, 1), 0).center().toPoint()
+        end = layout.pdf_rect_to_viewport(0, (241, 80, 1, 1), 0).center().toPoint()
+
+        qtbot.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(view.viewport(), pos=end)
+
+        assert view.current_selection() is not None
+        assert "First page sentence." in view.current_selection().text
+        assert final_selections.count() == 0
+
+        qtbot.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+        assert final_selections.count() == 1
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_hover_cursor_only_becomes_ibeam_near_pdf_text(
+    qtbot, tmp_path: Path
+) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "hover-cursor.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        layout = view._layout()
+        near = layout.pdf_rect_to_viewport(0, (66, 55, 1, 1), 0).center().toPoint()
+        far = layout.pdf_rect_to_viewport(0, (350, 350, 1, 1), 0).center().toPoint()
+
+        near_event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(near),
+            QPointF(view.viewport().mapToGlobal(near)),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(view.viewport(), near_event)
+        assert view.viewport().cursor().shape() == Qt.CursorShape.IBeamCursor
+
+        far_event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(far),
+            QPointF(view.viewport().mapToGlobal(far)),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(view.viewport(), far_event)
+        assert view.viewport().cursor().shape() == Qt.CursorShape.ArrowCursor
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_drag_far_from_pdf_text_does_not_create_selection(
+    qtbot, tmp_path: Path
+) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "far-from-text.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    final_selections = QSignalSpy(view.selection_changed)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        layout = view._layout()
+        start = layout.pdf_rect_to_viewport(0, (350, 350, 1, 1), 0).center().toPoint()
+        end = layout.pdf_rect_to_viewport(0, (450, 420, 1, 1), 0).center().toPoint()
+
+        qtbot.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(view.viewport(), pos=end)
+        qtbot.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+        assert view.current_selection() is None
+        assert final_selections.count() == 0
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_drag_started_on_text_can_finish_beyond_line_end(
+    qtbot, tmp_path: Path
+) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "beyond-line-end.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        layout = view._layout()
+        start = layout.pdf_rect_to_viewport(0, (74, 64, 1, 1), 0).center().toPoint()
+        end = layout.pdf_rect_to_viewport(0, (300, 105, 1, 1), 0).center().toPoint()
 
         qtbot.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
         qtbot.mouseMove(view.viewport(), pos=end)

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
-from PySide6.QtCore import QMargins, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QMargins, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
@@ -134,11 +135,14 @@ class SelectablePdfView(QPdfView):
         self._annotations: list[PdfAnnotation] = []
         self._drag_start: tuple[int, QPointF] | None = None
         self._drag_end: tuple[int, QPointF] | None = None
+        self._page_text_bounds: dict[int, tuple[QRectF, ...]] = {}
         self._theme_id = "eye_care"
         self._current_page = -1
         self.verticalScrollBar().valueChanged.connect(self._update_current_page)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
         self.pageNavigator().currentPageChanged.connect(self._set_current_page)
+        self.viewport().setMouseTracking(True)
+        self.viewport().installEventFilter(self)
 
     @property
     def document_key(self) -> str:
@@ -153,6 +157,7 @@ class SelectablePdfView(QPdfView):
         self.setZoomFactor(1.0)
         self._selection = None
         self._annotations = []
+        self._page_text_bounds.clear()
         self._path = candidate
         self._document_key = ""
         self._document.close()
@@ -238,9 +243,117 @@ class SelectablePdfView(QPdfView):
             self.horizontalScrollBar().value(),
         )
 
+    def _text_bounds(self, page_index: int) -> tuple[QRectF, ...]:
+        cached = self._page_text_bounds.get(page_index)
+        if cached is not None:
+            return cached
+        bounds: list[QRectF] = []
+        if 0 <= page_index < self._document.pageCount():
+            for polygon in self._document.getAllText(page_index).bounds():
+                rect = polygon.boundingRect()
+                if not rect.isEmpty():
+                    bounds.append(rect)
+        result = tuple(bounds)
+        self._page_text_bounds[page_index] = result
+        return result
+
+    def _nearest_text_point(
+        self,
+        page_index: int,
+        point: QPointF,
+        max_distance: float | None = 10.0,
+    ) -> QPointF | None:
+        closest: QPointF | None = None
+        closest_distance = float("inf")
+        inset = 0.5
+        for rect in self._text_bounds(page_index):
+            left = min(rect.right(), rect.left() + inset)
+            right = max(rect.left(), rect.right() - inset)
+            top = min(rect.bottom(), rect.top() + inset)
+            bottom = max(rect.top(), rect.bottom() - inset)
+            candidate = QPointF(
+                max(left, min(right, point.x())),
+                max(top, min(bottom, point.y())),
+            )
+            distance = math.hypot(
+                candidate.x() - point.x(), candidate.y() - point.y()
+            )
+            if distance < closest_distance:
+                closest = candidate
+                closest_distance = distance
+        if max_distance is None or closest_distance <= max_distance:
+            return closest
+        return None
+
+    def has_selectable_text_near(self, position: QPointF) -> bool:
+        hit = self._hit(position)
+        return bool(
+            hit and self._nearest_text_point(hit[0], hit[1]) is not None
+        )
+
+    def _selection_for_drag(
+        self,
+        start: tuple[int, QPointF],
+        end: tuple[int, QPointF],
+    ) -> PdfTextSelection | None:
+        if start[0] != end[0]:
+            return None
+        selected = self._document.getSelection(start[0], start[1], end[1])
+        if not selected.isValid():
+            snapped_start = self._nearest_text_point(start[0], start[1])
+            snapped_end = self._nearest_text_point(
+                end[0], end[1], max_distance=None
+            )
+            if snapped_start is None or snapped_end is None:
+                return None
+            selected = self._document.getSelection(
+                start[0], snapped_start, snapped_end
+            )
+        if not selected.isValid():
+            return None
+        try:
+            text = normalize_pdf_selection(selected.text())
+        except ValueError:
+            return None
+        if not text:
+            return None
+        bounds: list[tuple[float, float, float, float]] = []
+        for polygon in selected.bounds():
+            rect = polygon.boundingRect()
+            bounds.append((rect.x(), rect.y(), rect.width(), rect.height()))
+        start_index, end_index = selected.startIndex(), selected.endIndex()
+        if start_index > end_index:
+            start_index, end_index = end_index, start_index
+        return PdfTextSelection(
+            start[0], start_index, end_index, text, tuple(bounds)
+        )
+
+    def _update_hover_cursor(self, position: QPointF) -> None:
+        shape = (
+            Qt.CursorShape.IBeamCursor
+            if self.has_selectable_text_near(position)
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.viewport().setCursor(shape)
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self.viewport()
+            and event.type() == QEvent.Type.MouseMove
+            and not event.buttons()
+        ):
+            self._update_hover_cursor(event.position())
+        return super().eventFilter(watched, event)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start = self._hit(event.position())
+            hit = self._hit(event.position())
+            if not hit or self._nearest_text_point(hit[0], hit[1]) is None:
+                self._drag_start = None
+                self._drag_end = None
+                super().mousePressEvent(event)
+                return
+            self._drag_start = hit
             self._drag_end = self._drag_start
             self._selection = None
             self.viewport().update()
@@ -253,9 +366,13 @@ class SelectablePdfView(QPdfView):
             hit = self._hit(event.position())
             if hit and hit[0] == self._drag_start[0]:
                 self._drag_end = hit
+                self._selection = self._selection_for_drag(
+                    self._drag_start, self._drag_end
+                )
                 self.viewport().update()
             event.accept()
             return
+        self._update_hover_cursor(event.position())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -272,30 +389,10 @@ class SelectablePdfView(QPdfView):
         if not end or start[0] != end[0]:
             self.selection_changed.emit(None)
             return
-        selected = self._document.getSelection(start[0], start[1], end[1])
-        if not selected.isValid():
-            self.selection_changed.emit(None)
-            return
-        try:
-            text = normalize_pdf_selection(selected.text())
-        except ValueError as exc:
-            self.load_failed.emit(str(exc))
-            return
-        if not text:
-            self.selection_changed.emit(None)
-            return
-        bounds: list[tuple[float, float, float, float]] = []
-        for polygon in selected.bounds():
-            rect = polygon.boundingRect()
-            bounds.append((rect.x(), rect.y(), rect.width(), rect.height()))
-        start_index, end_index = selected.startIndex(), selected.endIndex()
-        if start_index > end_index:
-            start_index, end_index = end_index, start_index
-        self._selection = PdfTextSelection(
-            start[0], start_index, end_index, text, tuple(bounds)
-        )
+        self._selection = self._selection_for_drag(start, end)
         self.selection_changed.emit(self._selection)
         self.viewport().update()
+        self._update_hover_cursor(event.position())
         event.accept()
 
     def _update_current_page(self, *_args) -> None:
