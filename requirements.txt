@@ -1,4 +1,5 @@
 PySide6-Essentials==6.10.1
+PySide6-Addons==6.10.1
 requests>=2.31.0
 pywin32>=306; platform_system=="Windows"
 comtypes>=1.4.8; platform_system=="Windows"
