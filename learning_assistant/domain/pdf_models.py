@@ -33,3 +33,16 @@ class PdfTextSelection:
     end_index: int
     text: str
     bounds: PdfBounds = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PdfAnnotation:
+    id: int
+    document_key: str
+    page_index: int
+    start_index: int
+    end_index: int
+    selected_text: str
+    color: str
+    bounds: PdfBounds
+    created_at: int
