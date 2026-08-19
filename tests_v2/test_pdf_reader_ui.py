@@ -13,6 +13,7 @@ from learning_assistant.domain.pdf_models import (
     PdfTranslationResult,
 )
 from learning_assistant.ui.pdf_reader_window import PdfReaderWindow
+from learning_assistant.ui.pdf_reader_tab import PdfReaderTab
 
 
 class FakePdfController(QObject):
@@ -31,6 +32,7 @@ class FakePdfController(QObject):
         self.translate_calls = 0
         self.highlight_colors: list[str] = []
         self.delete_calls = 0
+        self.dispose_calls = 0
 
     def set_selection(self, selection, document_key: str) -> None:
         self.selection = selection
@@ -47,6 +49,9 @@ class FakePdfController(QObject):
 
     def annotations(self):
         return []
+
+    def dispose(self) -> None:
+        self.dispose_calls += 1
 
 
 def _settings(tmp_path: Path, initial: dict | None = None) -> SettingsStore:
@@ -71,6 +76,17 @@ def test_pdf_settings_normalize_invalid_theme(tmp_path: Path) -> None:
     settings = _settings(tmp_path, {"pdf": {"theme": "neon", "last_directory": 12}})
 
     assert settings.get("pdf") == {"theme": "eye_care", "last_directory": ""}
+
+
+def test_pdf_reader_tab_closes_only_its_controller(qtbot, tmp_path: Path) -> None:
+    controller = FakePdfController()
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
+
+    tab.close_session()
+    tab.close_session()
+
+    assert controller.dispose_calls == 1
 
 
 def test_pdf_reader_defaults_to_eye_care_and_hides_phrase_panel(
