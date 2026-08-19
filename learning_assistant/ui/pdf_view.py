@@ -175,6 +175,17 @@ class SelectablePdfView(QPdfView):
         self._update_current_page()
         return True
 
+    def close_document(self) -> None:
+        self._document.close()
+        self._path = None
+        self._document_key = ""
+        self._selection = None
+        self._annotations = []
+        self._page_text_bounds.clear()
+        self._drag_start = None
+        self._drag_end = None
+        self.viewport().update()
+
     def set_pdf_password(self, password: str) -> bool:
         if not self._path:
             return False

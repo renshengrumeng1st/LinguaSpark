@@ -1,7 +1,8 @@
-"""PDF reader window shell around a single document session."""
+"""Multi-document PDF reader window."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -9,10 +10,13 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QStackedWidget,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -32,26 +36,49 @@ THEME_NAMES = {
 
 
 class PdfReaderWindow(QMainWindow):
-    """Temporary one-tab window shell; multi-tab orchestration follows."""
+    """Manage independent PDF sessions and route global reader actions."""
 
     compact_mode_requested = Signal()
     settings_requested = Signal()
 
     def __init__(
         self,
-        controller: PdfTranslationController,
-        settings: SettingsStore,
+        settings: SettingsStore | PdfTranslationController,
+        controller_factory: Callable[[], PdfTranslationController] | SettingsStore,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.controller = controller
-        self.settings = settings
+        if isinstance(settings, SettingsStore):
+            self.settings = settings
+            if not callable(controller_factory):
+                raise TypeError("controller_factory must be callable")
+            self._controller_factory = controller_factory
+        else:
+            # Transitional compatibility for callers using the former signature.
+            initial_controller = settings
+            if not isinstance(controller_factory, SettingsStore):
+                raise TypeError("settings must be a SettingsStore")
+            self.settings = controller_factory
+            pending = [initial_controller]
+
+            def legacy_factory() -> PdfTranslationController:
+                if pending:
+                    return pending.pop()
+                return PdfTranslationController(
+                    self.settings,
+                    initial_controller.repository,
+                    initial_controller.client,
+                )
+
+            self._controller_factory = legacy_factory
+        self._tabs_by_path: dict[str, PdfReaderTab] = {}
         self.setWindowTitle("LinguaSpark · PDF 阅读模式")
         self.resize(1200, 760)
         self.setMinimumSize(900, 600)
         self._build_ui()
         self._connect()
         self._load_pdf_preferences()
+        self._sync_empty_state()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -60,7 +87,9 @@ class PdfReaderWindow(QMainWindow):
         root.setContentsMargins(14, 12, 14, 14)
         root.setSpacing(10)
 
-        toolbar = QHBoxLayout()
+        self.toolbar_widget = QFrame()
+        toolbar = QHBoxLayout(self.toolbar_widget)
+        toolbar.setContentsMargins(0, 0, 0, 0)
         title = QLabel("PDF 阅读")
         title.setObjectName("pdfTitle")
         toolbar.addWidget(title)
@@ -94,21 +123,154 @@ class PdfReaderWindow(QMainWindow):
         self.settings_button = QToolButton()
         self.settings_button.setText("设置")
         toolbar.addWidget(self.settings_button)
-        root.addLayout(toolbar)
+        root.addWidget(self.toolbar_widget)
 
-        self.reader_tab = PdfReaderTab(self.controller, self.settings)
-        root.addWidget(self.reader_tab, 1)
+        self.content_stack = QStackedWidget()
+        self.empty_state = QWidget()
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.addStretch(1)
+        empty_title = QLabel("打开 PDF，开始专注阅读")
+        empty_title.setObjectName("emptyTitle")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_title)
+        self.empty_open_button = QPushButton("打开 PDF")
+        self.empty_open_button.setObjectName("primary")
+        self.empty_open_button.setMaximumWidth(180)
+        empty_layout.addWidget(
+            self.empty_open_button, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        self.global_status = QLabel("")
+        self.global_status.setObjectName("pdfStatus")
+        self.global_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self.global_status)
+        empty_layout.addStretch(1)
+        self.content_stack.addWidget(self.empty_state)
+
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setDocumentMode(True)
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.setMovable(True)
+        self.content_stack.addWidget(self.tab_widget)
+        root.addWidget(self.content_stack, 1)
         self.setCentralWidget(central)
 
     def _connect(self) -> None:
-        self.open_button.clicked.connect(self.open_file)
+        self.open_button.clicked.connect(lambda: self.open_files())
+        self.empty_open_button.clicked.connect(lambda: self.open_files())
         self.compact_button.clicked.connect(self.compact_mode_requested)
         self.settings_button.clicked.connect(self.settings_requested)
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
-        self.zoom_out_button.clicked.connect(lambda: self.pdf_view.adjust_zoom(-1))
-        self.zoom_in_button.clicked.connect(lambda: self.pdf_view.adjust_zoom(1))
-        self.fit_width_button.clicked.connect(self.pdf_view.fit_to_width)
-        self.pdf_view.zoomFactorChanged.connect(self._zoom_changed)
+        self.zoom_out_button.clicked.connect(lambda: self.adjust_active_zoom(-1))
+        self.zoom_in_button.clicked.connect(lambda: self.adjust_active_zoom(1))
+        self.fit_width_button.clicked.connect(self.fit_active_width)
+        self.tab_widget.currentChanged.connect(self._current_changed)
+        self.tab_widget.tabCloseRequested.connect(self.close_tab)
+
+    @staticmethod
+    def _path_key(path: str | Path) -> str:
+        return str(Path(path).resolve()).casefold()
+
+    def open_files(self, paths: Iterable[str | Path] | None = None) -> int:
+        selected_paths = list(paths or [])
+        if not selected_paths:
+            last_dir = str(self.settings.get("pdf", {}).get("last_directory", ""))
+            selected, _ = QFileDialog.getOpenFileNames(
+                self, "打开 PDF", last_dir, "PDF 文件 (*.pdf)"
+            )
+            selected_paths = selected
+        opened = 0
+        for path in selected_paths:
+            opened += int(self.open_file(path))
+        return opened
+
+    def open_file(self, path: str | Path | None = None) -> bool:
+        if path is None:
+            return bool(self.open_files())
+        resolved = Path(path).resolve()
+        key = self._path_key(resolved)
+        existing = self._tabs_by_path.get(key)
+        if existing is not None:
+            self.tab_widget.setCurrentWidget(existing)
+            return True
+
+        controller = self._controller_factory()
+        tab = PdfReaderTab(controller, self.settings)
+        tab.set_theme(str(self.theme_combo.currentData() or "eye_care"))
+        if not tab.load_file(resolved):
+            self.global_status.setText(tab.status.text() or "无法打开此 PDF")
+            tab.close_session()
+            tab.deleteLater()
+            self._sync_empty_state()
+            return False
+
+        tab.pdf_view.zoomFactorChanged.connect(
+            lambda factor, source=tab: self._tab_zoom_changed(source, factor)
+        )
+        index = self.tab_widget.addTab(tab, resolved.name)
+        self.tab_widget.setTabToolTip(index, str(resolved))
+        self._tabs_by_path[key] = tab
+        self.tab_widget.setCurrentIndex(index)
+        pdf = dict(self.settings.get("pdf", {}))
+        pdf["last_directory"] = str(resolved.parent)
+        self.settings.set("pdf", pdf)
+        self.settings.save()
+        self.global_status.clear()
+        self._sync_empty_state()
+        return True
+
+    def current_tab(self) -> PdfReaderTab | None:
+        widget = self.tab_widget.currentWidget()
+        return widget if isinstance(widget, PdfReaderTab) else None
+
+    def close_tab(self, index: int) -> None:
+        widget = self.tab_widget.widget(index)
+        if not isinstance(widget, PdfReaderTab):
+            return
+        self._tabs_by_path.pop(self._path_key(widget.document_path), None)
+        widget.close_session()
+        self.tab_widget.removeTab(index)
+        widget.deleteLater()
+        self._sync_empty_state()
+
+    def close_all_tabs(self) -> None:
+        while self.tab_widget.count():
+            self.close_tab(self.tab_widget.count() - 1)
+
+    def _sync_empty_state(self) -> None:
+        has_tabs = self.tab_widget.count() > 0
+        self.content_stack.setCurrentWidget(
+            self.tab_widget if has_tabs else self.empty_state
+        )
+        for control in (
+            self.zoom_out_button,
+            self.zoom_in_button,
+            self.fit_width_button,
+        ):
+            control.setEnabled(has_tabs)
+        if not has_tabs:
+            self.zoom_label.setText("100%")
+
+    def _current_changed(self, _index: int) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            self._zoom_changed(tab.pdf_view.zoomFactor())
+
+    def _tab_zoom_changed(self, tab: PdfReaderTab, factor: float) -> None:
+        if tab is self.current_tab():
+            self._zoom_changed(factor)
+
+    def adjust_active_zoom(self, steps: int) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.pdf_view.adjust_zoom(steps)
+
+    def fit_active_width(self) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.pdf_view.fit_to_width()
+
+    def _zoom_changed(self, factor: float) -> None:
+        self.zoom_label.setText(f"{round(factor * 100):d}%")
 
     def _load_pdf_preferences(self) -> None:
         theme = str(self.settings.get("pdf", {}).get("theme", "eye_care"))
@@ -125,34 +287,26 @@ class PdfReaderWindow(QMainWindow):
         self.settings.save()
 
     def _apply_theme(self, theme: str) -> None:
-        self.reader_tab.set_theme(theme)
+        for index in range(self.tab_widget.count()):
+            tab = self.tab_widget.widget(index)
+            if isinstance(tab, PdfReaderTab):
+                tab.set_theme(theme)
         self.centralWidget().setStyleSheet(
-            "QLabel#pdfTitle { font-size: 20px; font-weight: 700; }"
+            """
+            QLabel#pdfTitle { font-size: 20px; font-weight: 700; }
+            QLabel#emptyTitle { font-size: 22px; font-weight: 650; color: #374151; }
+            QLabel#pdfStatus { color: #6b7280; }
+            """
         )
 
-    def open_file(self, path: str | Path | None = None) -> bool:
-        selected = str(path) if path else ""
-        if not selected:
-            last_dir = str(self.settings.get("pdf", {}).get("last_directory", ""))
-            selected, _ = QFileDialog.getOpenFileName(
-                self, "打开 PDF", last_dir, "PDF 文件 (*.pdf)"
-            )
-        if not selected or not self.reader_tab.load_file(selected):
-            return False
-        pdf = dict(self.settings.get("pdf", {}))
-        pdf["last_directory"] = str(Path(selected).resolve().parent)
-        self.settings.set("pdf", pdf)
-        self.settings.save()
-        return True
-
-    def _zoom_changed(self, factor: float) -> None:
-        self.zoom_label.setText(f"{round(factor * 100):d}%")
-
     def has_active_selection(self) -> bool:
-        return self.reader_tab.has_active_selection()
+        tab = self.current_tab()
+        return tab is not None and tab.has_active_selection()
 
     def translate_active_selection(self) -> None:
-        self.reader_tab.translate_active_selection()
+        tab = self.current_tab()
+        if tab is not None:
+            tab.translate_active_selection()
 
     def show_front(self) -> None:
         self.show()
@@ -163,47 +317,3 @@ class PdfReaderWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         event.ignore()
         self.hide()
-
-    @property
-    def splitter(self):
-        return self.reader_tab.splitter
-
-    @property
-    def pdf_view(self):
-        return self.reader_tab.pdf_view
-
-    @property
-    def phrase_panel(self):
-        return self.reader_tab.phrase_panel
-
-    @property
-    def phrase_text(self):
-        return self.reader_tab.phrase_text
-
-    @property
-    def translation(self):
-        return self.reader_tab.translation
-
-    @property
-    def status(self):
-        return self.reader_tab.status
-
-    @property
-    def highlight_combo(self):
-        return self.reader_tab.highlight_combo
-
-    @property
-    def highlight_button(self):
-        return self.reader_tab.highlight_button
-
-    @property
-    def remove_highlight_button(self):
-        return self.reader_tab.remove_highlight_button
-
-    @property
-    def copy_button(self):
-        return self.reader_tab.copy_button
-
-    @staticmethod
-    def clipboard_text() -> str:
-        return PdfReaderTab.clipboard_text()

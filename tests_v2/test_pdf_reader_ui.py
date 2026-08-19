@@ -92,15 +92,20 @@ def test_pdf_reader_tab_closes_only_its_controller(qtbot, tmp_path: Path) -> Non
 def test_pdf_reader_defaults_to_eye_care_and_hides_phrase_panel(
     qtbot, tmp_path: Path
 ) -> None:
-    window = PdfReaderWindow(FakePdfController(), _settings(tmp_path))
+    settings = _settings(tmp_path)
+    window = PdfReaderWindow(settings, FakePdfController)
     qtbot.addWidget(window)
+    tab = PdfReaderTab(FakePdfController(), settings)
+    qtbot.addWidget(tab)
+    tab.resize(1000, 700)
+    tab.show()
     window.resize(1000, 700)
     window.show()
     qtbot.wait(10)
 
     assert window.theme_combo.currentData() == "eye_care"
-    assert window.phrase_panel.isHidden()
-    sizes = window.splitter.sizes()
+    assert tab.phrase_panel.isHidden()
+    sizes = tab.splitter.sizes()
     assert sizes[0] / sum(sizes) == pytest.approx(0.65, abs=0.04)
 
 
@@ -108,65 +113,65 @@ def test_translation_partial_is_visible_before_phrase_analysis(
     qtbot, tmp_path: Path
 ) -> None:
     controller = FakePdfController()
-    window = PdfReaderWindow(controller, _settings(tmp_path))
-    qtbot.addWidget(window)
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
 
     controller.translation_started.emit("A selected sentence.")
     controller.translation_partial.emit("快速译文")
-    assert window.translation.toPlainText() == "快速译文"
-    assert window.phrase_panel.isHidden()
+    assert tab.translation.toPlainText() == "快速译文"
+    assert tab.phrase_panel.isHidden()
 
     controller.phrase_ready.emit(PdfPhrase("selected sentence", "选中的句子"))
-    assert not window.phrase_panel.isHidden()
-    assert "selected sentence" in window.phrase_text.toPlainText()
+    assert not tab.phrase_panel.isHidden()
+    assert "selected sentence" in tab.phrase_text.toPlainText()
 
 
 def test_cached_completion_populates_translation_and_phrases(
     qtbot, tmp_path: Path
 ) -> None:
     controller = FakePdfController()
-    window = PdfReaderWindow(controller, _settings(tmp_path))
-    qtbot.addWidget(window)
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
     result = PdfTranslationResult(
         "缓存译文", (PdfPhrase("in context", "在语境中"),)
     )
 
     controller.translation_completed.emit(result, True)
 
-    assert window.translation.toPlainText() == "缓存译文"
-    assert "in context" in window.phrase_text.toPlainText()
-    assert "缓存" in window.status.text()
+    assert tab.translation.toPlainText() == "缓存译文"
+    assert "in context" in tab.phrase_text.toPlainText()
+    assert "缓存" in tab.status.text()
 
 
 def test_selection_actions_route_and_copy(qtbot, tmp_path: Path) -> None:
     controller = FakePdfController()
-    window = PdfReaderWindow(controller, _settings(tmp_path))
-    qtbot.addWidget(window)
-    window.pdf_view.selection_changed.emit(_selection())
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
+    tab.pdf_view.selection_changed.emit(_selection())
 
-    assert window.has_active_selection() is True
+    assert tab.has_active_selection() is True
     assert controller.selection == _selection()
-    window.translate_active_selection()
-    window.highlight_combo.setCurrentIndex(window.highlight_combo.findData("green"))
-    window.highlight_button.click()
-    window.remove_highlight_button.click()
+    tab.translate_active_selection()
+    tab.highlight_combo.setCurrentIndex(tab.highlight_combo.findData("green"))
+    tab.highlight_button.click()
+    tab.remove_highlight_button.click()
     controller.translation_partial.emit("可复制译文")
-    window.copy_button.click()
+    tab.copy_button.click()
 
     assert controller.translate_calls == 1
     assert controller.highlight_colors == ["green"]
     assert controller.delete_calls == 1
-    assert window.clipboard_text() == "可复制译文"
+    assert tab.clipboard_text() == "可复制译文"
 
 
 def test_document_load_sets_controller_identity_before_loading_marks(
     qtbot, tmp_path: Path
 ) -> None:
     controller = FakePdfController()
-    window = PdfReaderWindow(controller, _settings(tmp_path))
-    qtbot.addWidget(window)
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
 
-    window.pdf_view.document_loaded.emit("document-identity", 3)
+    tab.pdf_view.document_loaded.emit("document-identity", 3)
 
     assert controller.document_key == "document-identity"
     assert controller.selection is None
@@ -174,7 +179,7 @@ def test_document_load_sets_controller_identity_before_loading_marks(
 
 def test_theme_change_updates_view_and_persists(qtbot, tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    window = PdfReaderWindow(FakePdfController(), settings)
+    window = PdfReaderWindow(settings, FakePdfController)
     qtbot.addWidget(window)
 
     window.theme_combo.setCurrentIndex(window.theme_combo.findData("paper"))
@@ -188,17 +193,15 @@ def test_theme_change_updates_view_and_persists(qtbot, tmp_path: Path) -> None:
     assert saved.get("pdf")["theme"] == "paper"
 
 
-def test_zoom_toolbar_adjusts_percentage_and_fits_width(qtbot, tmp_path: Path) -> None:
-    window = PdfReaderWindow(FakePdfController(), _settings(tmp_path))
-    qtbot.addWidget(window)
+def test_pdf_tab_adjusts_zoom_and_fits_width(qtbot, tmp_path: Path) -> None:
+    tab = PdfReaderTab(FakePdfController(), _settings(tmp_path))
+    qtbot.addWidget(tab)
 
-    window.zoom_in_button.click()
-    assert window.pdf_view.zoomFactor() == pytest.approx(1.1)
-    assert window.zoom_label.text() == "110%"
+    tab.pdf_view.adjust_zoom(1)
+    assert tab.pdf_view.zoomFactor() == pytest.approx(1.1)
 
-    window.zoom_out_button.click()
-    assert window.pdf_view.zoomFactor() == pytest.approx(1.0)
-    assert window.zoom_label.text() == "100%"
+    tab.pdf_view.adjust_zoom(-1)
+    assert tab.pdf_view.zoomFactor() == pytest.approx(1.0)
 
-    window.fit_width_button.click()
-    assert window.pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth
+    tab.pdf_view.fit_to_width()
+    assert tab.pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth

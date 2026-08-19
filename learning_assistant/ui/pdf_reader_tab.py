@@ -157,6 +157,7 @@ class PdfReaderTab(QWidget):
         if self._closed:
             return
         self._closed = True
+        self.pdf_view.close_document()
         self.controller.dispose()
 
     def set_theme(self, theme: str) -> None:
