@@ -5,7 +5,8 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtPdfWidgets import QPdfView
 
 
@@ -213,6 +214,139 @@ def test_mouse_drag_extracts_text_from_real_pdf(qtbot, tmp_path: Path) -> None:
 
         assert view.current_selection() is not None
         assert "First page sentence." in view.current_selection().text
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_eye_care_theme_recolors_the_pdf_paper(qtbot, tmp_path: Path) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "eye-care-paper.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        view.set_reading_theme("eye_care")
+        qtbot.wait(50)
+        point = view._layout().pdf_rect_to_viewport(
+            0, (350, 350, 1, 1), 0
+        ).center().toPoint()
+        image = view.viewport().grab().toImage()
+        dpr = image.devicePixelRatio()
+        physical_point = QPoint(round(point.x() * dpr), round(point.y() * dpr))
+        paper = image.pixelColor(physical_point)
+
+        assert paper.red() == pytest.approx(234, abs=3)
+        assert paper.green() == pytest.approx(244, abs=3)
+        assert paper.blue() == pytest.approx(226, abs=3)
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_selected_sentence_has_a_visible_blue_overlay(qtbot, tmp_path: Path) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "blue-selection.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        layout = view._layout()
+        start = layout.pdf_rect_to_viewport(0, (74, 64, 1, 1), 0).center().toPoint()
+        end = layout.pdf_rect_to_viewport(0, (233, 70, 1, 1), 0).center().toPoint()
+        qtbot.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(view.viewport(), pos=end)
+        qtbot.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=end)
+        qtbot.wait(20)
+
+        image = view.viewport().grab().toImage()
+        selection = view.current_selection()
+        assert selection is not None
+        rect = layout.pdf_rect_to_viewport(0, selection.bounds[0], 0).toRect()
+        dpr = image.devicePixelRatio()
+        blue_pixels = [
+            image.pixelColor(x, y)
+            for y in range(
+                max(0, round(rect.top() * dpr)),
+                min(image.height(), round((rect.bottom() + 1) * dpr)),
+            )
+            for x in range(
+                max(0, round(rect.left() * dpr)),
+                min(image.width(), round((rect.right() + 1) * dpr)),
+            )
+        ]
+        assert any(
+            color.red() < 150 and color.blue() > 180
+            for color in blue_pixels
+        )
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_ctrl_wheel_changes_zoom_without_turning_pages(qtbot) -> None:
+    pdf_view = _pdf_view_module()
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    event = QWheelEvent(
+        QPointF(100, 100),
+        QPointF(100, 100),
+        QPoint(),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+    view.wheelEvent(event)
+
+    assert view.zoomFactor() == pytest.approx(1.1)
+    assert event.isAccepted()
+
+
+def test_opening_another_pdf_resets_zoom_to_100_percent(
+    qtbot, tmp_path: Path
+) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "reset-zoom.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    view.set_zoom_factor(2.0)
+
+    assert view.load_file(document_path) is True
+
+    assert view.zoomMode() == QPdfView.ZoomMode.Custom
+    assert view.zoomFactor() == pytest.approx(1.0)
+    view.document().close()
+
+
+def test_zoom_keeps_the_current_pdf_page(qtbot, tmp_path: Path) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "keep-page.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(420, 300)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.verticalScrollBar().maximum() > 0)
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+        qtbot.waitUntil(lambda: view.pageNavigator().currentPage() == 1)
+
+        view.set_zoom_factor(1.5)
+
+        qtbot.waitUntil(lambda: view.pageNavigator().currentPage() == 1)
+        assert view.zoomFactor() == pytest.approx(1.5)
     finally:
         view.document().close()
         view.close()

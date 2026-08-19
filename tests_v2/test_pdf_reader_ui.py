@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtPdfWidgets import QPdfView
 
 from learning_assistant.core.settings import SecretStore, SettingsStore
 from learning_assistant.domain.pdf_models import (
@@ -169,3 +170,19 @@ def test_theme_change_updates_view_and_persists(qtbot, tmp_path: Path) -> None:
         legacy_path=tmp_path / "missing.json",
     )
     assert saved.get("pdf")["theme"] == "paper"
+
+
+def test_zoom_toolbar_adjusts_percentage_and_fits_width(qtbot, tmp_path: Path) -> None:
+    window = PdfReaderWindow(FakePdfController(), _settings(tmp_path))
+    qtbot.addWidget(window)
+
+    window.zoom_in_button.click()
+    assert window.pdf_view.zoomFactor() == pytest.approx(1.1)
+    assert window.zoom_label.text() == "110%"
+
+    window.zoom_out_button.click()
+    assert window.pdf_view.zoomFactor() == pytest.approx(1.0)
+    assert window.zoom_label.text() == "100%"
+
+    window.fit_width_button.click()
+    assert window.pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth

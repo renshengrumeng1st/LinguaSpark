@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QMargins, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QResizeEvent
+from PySide6.QtGui import (
+    QColor,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 
@@ -142,6 +149,8 @@ class SelectablePdfView(QPdfView):
 
     def load_file(self, path: str | Path) -> bool:
         candidate = Path(path).resolve()
+        self.setZoomMode(QPdfView.ZoomMode.Custom)
+        self.setZoomFactor(1.0)
         self._selection = None
         self._annotations = []
         self._path = candidate
@@ -176,9 +185,32 @@ class SelectablePdfView(QPdfView):
         self.viewport().update()
 
     def set_zoom_factor(self, value: float) -> None:
+        navigator = self.pageNavigator()
+        page_index = navigator.currentPage()
+        location = navigator.currentLocation()
+        target = round(max(0.5, min(3.0, float(value))), 2)
         self.setZoomMode(QPdfView.ZoomMode.Custom)
-        self.setZoomFactor(max(0.5, min(3.0, float(value))))
+        self.setZoomFactor(target)
+        if page_index >= 0:
+            navigator.jump(page_index, location, target)
         self._update_current_page()
+
+    def adjust_zoom(self, steps: int) -> None:
+        if steps:
+            self.set_zoom_factor(self.zoomFactor() + steps * 0.1)
+
+    def fit_to_width(self) -> None:
+        self.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self._update_current_page()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta:
+                self.adjust_zoom(1 if delta > 0 else -1)
+                event.accept()
+                return
+        super().wheelEvent(event)
 
     def _layout(self) -> PdfPageLayout:
         sizes = [
@@ -291,14 +323,18 @@ class SelectablePdfView(QPdfView):
         viewport_rect = QRectF(self.viewport().rect())
 
         theme = QColor(READING_THEMES[self._theme_id])
-        theme.setAlpha(42 if self._theme_id != "white" else 0)
-        if theme.alpha():
+        if self._theme_id != "white":
+            painter.save()
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Multiply
+            )
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(theme)
             for page in layout.pages:
                 rect = page.rect.translated(-scroll_x, -scroll_y)
                 if rect.intersects(viewport_rect):
                     painter.drawRect(rect)
+            painter.restore()
 
         painter.setPen(Qt.PenStyle.NoPen)
         for annotation in self._annotations:
@@ -308,7 +344,7 @@ class SelectablePdfView(QPdfView):
                     annotation.page_index, bound, scroll_y, scroll_x
                 ))
         if self._selection:
-            painter.setBrush(QColor(59, 130, 246, 88))
+            painter.setBrush(QColor(46, 134, 193, 150))
             for bound in self._selection.bounds:
                 painter.drawRect(layout.pdf_rect_to_viewport(
                     self._selection.page_index, bound, scroll_y, scroll_x

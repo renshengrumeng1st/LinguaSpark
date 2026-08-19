@@ -77,6 +77,21 @@ class PdfReaderWindow(QMainWindow):
         self.compact_button.setObjectName("secondary")
         toolbar.addWidget(self.compact_button)
         toolbar.addStretch(1)
+        self.zoom_out_button = QToolButton()
+        self.zoom_out_button.setText("−")
+        self.zoom_out_button.setToolTip("缩小（Ctrl + 滚轮）")
+        toolbar.addWidget(self.zoom_out_button)
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setMinimumWidth(46)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toolbar.addWidget(self.zoom_label)
+        self.zoom_in_button = QToolButton()
+        self.zoom_in_button.setText("+")
+        self.zoom_in_button.setToolTip("放大（Ctrl + 滚轮）")
+        toolbar.addWidget(self.zoom_in_button)
+        self.fit_width_button = QPushButton("适合宽度")
+        self.fit_width_button.setObjectName("secondary")
+        toolbar.addWidget(self.fit_width_button)
         toolbar.addWidget(QLabel("背景"))
         self.theme_combo = QComboBox()
         for theme_id, name in THEME_NAMES.items():
@@ -166,6 +181,10 @@ class PdfReaderWindow(QMainWindow):
         self.compact_button.clicked.connect(self.compact_mode_requested)
         self.settings_button.clicked.connect(self.settings_requested)
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
+        self.zoom_out_button.clicked.connect(lambda: self.pdf_view.adjust_zoom(-1))
+        self.zoom_in_button.clicked.connect(lambda: self.pdf_view.adjust_zoom(1))
+        self.fit_width_button.clicked.connect(self.pdf_view.fit_to_width)
+        self.pdf_view.zoomFactorChanged.connect(self._zoom_changed)
         self.translate_button.clicked.connect(self.translate_active_selection)
         self.copy_button.clicked.connect(self._copy_translation)
         self.highlight_button.clicked.connect(self._add_highlight)
@@ -179,6 +198,9 @@ class PdfReaderWindow(QMainWindow):
         self.controller.translation_completed.connect(self._translation_completed)
         self.controller.translation_failed.connect(self._translation_failed)
         self.controller.annotations_changed.connect(self.pdf_view.set_annotations)
+
+    def _zoom_changed(self, factor: float) -> None:
+        self.zoom_label.setText(f"{round(factor * 100):d}%")
 
     def _load_pdf_preferences(self) -> None:
         pdf = self.settings.get("pdf", {})
