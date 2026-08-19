@@ -47,14 +47,21 @@ class PdfTranslationController(QObject):
         self._active_request_id: int | None = None
         self._active_cache_key = ""
         self._active_model_id = ""
+        self._disposed = False
 
     @property
     def selection(self) -> PdfTextSelection | None:
         return self._selection
 
+    @property
+    def active_request_id(self) -> int | None:
+        return self._active_request_id
+
     def set_selection(
         self, selection: PdfTextSelection | None, document_key: str
     ) -> None:
+        if self._disposed:
+            return
         self.cancel()
         self._selection = selection
         self._document_key = document_key
@@ -64,6 +71,23 @@ class PdfTranslationController(QObject):
         if self._active_request_id is not None:
             self.client.cancel(self._active_request_id)
             self._active_request_id = None
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+        self.cancel()
+        connections = (
+            (self.client.translation_partial, self._on_partial),
+            (self.client.phrase_ready, self._on_phrase),
+            (self.client.completed, self._on_completed),
+            (self.client.failed, self._on_failed),
+        )
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._disposed = True
 
     @staticmethod
     def _result_from_payload(payload: dict) -> PdfTranslationResult:
@@ -90,6 +114,8 @@ class PdfTranslationController(QObject):
         }
 
     def translate_selection(self) -> None:
+        if self._disposed:
+            return
         if not self._selection:
             self.translation_failed.emit("请先在 PDF 中选择文字")
             return
@@ -129,11 +155,11 @@ class PdfTranslationController(QObject):
         self._active_request_id = self.client.start(profile, text, languages)
 
     def _on_partial(self, request_id: int, text: str) -> None:
-        if request_id == self._active_request_id:
+        if not self._disposed and request_id == self._active_request_id:
             self.translation_partial.emit(text)
 
     def _on_phrase(self, request_id: int, phrase: PdfPhrase) -> None:
-        if request_id == self._active_request_id:
+        if not self._disposed and request_id == self._active_request_id:
             self.phrase_ready.emit(phrase)
 
     def _on_completed(
@@ -142,7 +168,7 @@ class PdfTranslationController(QObject):
         result: PdfTranslationResult,
         timings: dict,
     ) -> None:
-        if request_id != self._active_request_id:
+        if self._disposed or request_id != self._active_request_id:
             return
         self.repository.record_metric(
             self._active_model_id,
@@ -158,7 +184,7 @@ class PdfTranslationController(QObject):
         self.translation_completed.emit(result, False)
 
     def _on_failed(self, request_id: int, message: str, timings: dict) -> None:
-        if request_id != self._active_request_id:
+        if self._disposed or request_id != self._active_request_id:
             return
         self.repository.record_metric(
             self._active_model_id,
@@ -176,7 +202,7 @@ class PdfTranslationController(QObject):
         return self.repository.pdf_annotations(self._document_key)
 
     def add_highlight(self, color: str) -> None:
-        if not self._selection or not self._document_key:
+        if self._disposed or not self._selection or not self._document_key:
             return
         self.repository.add_pdf_annotation(
             self._document_key, self._selection, color
@@ -184,7 +210,7 @@ class PdfTranslationController(QObject):
         self.annotations_changed.emit(self.annotations())
 
     def delete_highlight(self) -> None:
-        if not self._selection or not self._document_key:
+        if self._disposed or not self._selection or not self._document_key:
             return
         self.repository.delete_pdf_annotation(
             self._document_key,

@@ -190,3 +190,46 @@ def test_pdf_controller_persists_and_deletes_current_highlight(
 
     assert changes[0][0].color == "pink"
     assert changes[-1] == []
+
+
+def test_shared_pdf_client_keeps_tab_requests_isolated_and_disposable(
+    tmp_path: Path,
+) -> None:
+    _, controller_module = _pdf_modules()
+    settings = _settings(tmp_path)
+    repository = LearningRepository(tmp_path / "learning.sqlite3")
+    client = FakePdfClient()
+    first = controller_module.PdfTranslationController(
+        settings, repository, client
+    )
+    second = controller_module.PdfTranslationController(
+        settings, repository, client
+    )
+    first_partials: list[str] = []
+    second_partials: list[str] = []
+    first.translation_partial.connect(first_partials.append)
+    second.translation_partial.connect(second_partials.append)
+    first.set_selection(_selection("First tab."), "first-doc")
+    second.set_selection(_selection("Second tab."), "second-doc")
+
+    first.translate_selection()
+    first_id = client.next_id
+    second.translate_selection()
+    second_id = client.next_id
+    client.translation_partial.emit(second_id, "第二个标签")
+
+    assert first_partials == []
+    assert second_partials == ["第二个标签"]
+    assert first.active_request_id == first_id
+    assert second.active_request_id == second_id
+
+    first.dispose()
+    first.dispose()
+    client.translation_partial.emit(first_id, "迟到结果")
+    client.translation_partial.emit(second_id, "继续接收")
+
+    assert first_partials == []
+    assert second_partials == ["第二个标签", "继续接收"]
+    assert client.cancel_calls == [first_id]
+    assert first.active_request_id is None
+    assert second.active_request_id == second_id
