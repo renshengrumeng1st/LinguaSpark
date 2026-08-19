@@ -1,0 +1,15 @@
+.venv/
+.worktrees/
+.superpowers/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.spec
+data/ecdict-source.*
+config.json
+translation_cache.json
+translation_history.json
+usage_stats.json
+translate
