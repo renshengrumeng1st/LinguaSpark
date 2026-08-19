@@ -44,12 +44,17 @@ class PdfPageLayout:
         viewport_width: float,
         margin: float,
         spacing: float,
+        point_scale: float = 1.0,
     ):
         self.zoom = max(0.01, float(zoom))
+        self.coordinate_scale = self.zoom * max(0.01, float(point_scale))
         self.margin = max(0.0, float(margin))
         self.spacing = max(0.0, float(spacing))
         scaled = [
-            (max(0.0, width) * self.zoom, max(0.0, height) * self.zoom)
+            (
+                max(0.0, width) * self.coordinate_scale,
+                max(0.0, height) * self.coordinate_scale,
+            )
             for width, height in page_sizes
         ]
         widest = max((width for width, _ in scaled), default=0.0)
@@ -77,8 +82,8 @@ class PdfPageLayout:
             if page.rect.contains(content):
                 relative = content - page.rect.topLeft()
                 return page.index, QPointF(
-                    relative.x() / self.zoom,
-                    relative.y() / self.zoom,
+                    relative.x() / self.coordinate_scale,
+                    relative.y() / self.coordinate_scale,
                 )
         return None
 
@@ -94,10 +99,10 @@ class PdfPageLayout:
             return QRectF()
         x, y, width, height = bounds
         return QRectF(
-            page.rect.left() + x * self.zoom - scroll_x,
-            page.rect.top() + y * self.zoom - scroll_y,
-            width * self.zoom,
-            height * self.zoom,
+            page.rect.left() + x * self.coordinate_scale - scroll_x,
+            page.rect.top() + y * self.coordinate_scale - scroll_y,
+            width * self.coordinate_scale,
+            height * self.coordinate_scale,
         )
 
 
@@ -126,6 +131,7 @@ class SelectablePdfView(QPdfView):
         self._current_page = -1
         self.verticalScrollBar().valueChanged.connect(self._update_current_page)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
+        self.pageNavigator().currentPageChanged.connect(self._set_current_page)
 
     @property
     def document_key(self) -> str:
@@ -188,7 +194,8 @@ class SelectablePdfView(QPdfView):
             self.zoomFactor(),
             self.viewport().width(),
             float(max(margins.left(), margins.right())),
-            float(self.pageSpacing()),
+            float(self.pageSpacing() * 2),
+            float(self.logicalDpiX()) / 72.0,
         )
 
     def _hit(self, position: QPointF) -> tuple[int, QPointF] | None:
@@ -262,11 +269,12 @@ class SelectablePdfView(QPdfView):
     def _update_current_page(self, *_args) -> None:
         if not self._document.pageCount():
             return
-        center = QPointF(self.viewport().width() / 2, self.viewport().height() / 2)
-        hit = self._hit(center)
-        if hit and hit[0] != self._current_page:
-            self._current_page = hit[0]
-            self.current_page_changed.emit(self._current_page)
+        self._set_current_page(self.pageNavigator().currentPage())
+
+    def _set_current_page(self, page_index: int) -> None:
+        if page_index >= 0 and page_index != self._current_page:
+            self._current_page = page_index
+            self.current_page_changed.emit(page_index)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

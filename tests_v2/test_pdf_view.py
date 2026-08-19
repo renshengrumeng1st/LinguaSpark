@@ -5,7 +5,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtPdfWidgets import QPdfView
 
 
@@ -141,6 +141,78 @@ def test_selectable_pdf_view_rejects_non_pdf_file(qtbot, tmp_path: Path) -> None
         assert failures == ["无法打开此 PDF"]
         assert view.set_pdf_password("secret") is False
         assert failures == ["无法打开此 PDF", "无法打开此 PDF"]
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_continuous_scroll_reports_second_page(qtbot, tmp_path: Path) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "scroll-pages.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    pages: list[int] = []
+    view.current_page_changed.connect(pages.append)
+    try:
+        view.resize(420, 300)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.verticalScrollBar().maximum() > 0)
+
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+
+        qtbot.waitUntil(lambda: bool(pages) and pages[-1] == 1)
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_overlay_layout_matches_qt_pdf_scroll_extents(qtbot, tmp_path: Path) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "layout-pages.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(420, 300)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.verticalScrollBar().maximum() > 0)
+        layout = view._layout()
+
+        assert layout.content_width == pytest.approx(
+            view.horizontalScrollBar().maximum() + view.viewport().width(), abs=1
+        )
+        assert layout.content_height == pytest.approx(
+            view.verticalScrollBar().maximum() + view.viewport().height(), abs=1
+        )
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_mouse_drag_extracts_text_from_real_pdf(qtbot, tmp_path: Path) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "select-text.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        layout = view._layout()
+        start = layout.pdf_rect_to_viewport(0, (74, 64, 1, 1), 0).center().toPoint()
+        end = layout.pdf_rect_to_viewport(0, (233, 70, 1, 1), 0).center().toPoint()
+
+        qtbot.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(view.viewport(), pos=end)
+        qtbot.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+        assert view.current_selection() is not None
+        assert "First page sentence." in view.current_selection().text
     finally:
         view.document().close()
         view.close()
