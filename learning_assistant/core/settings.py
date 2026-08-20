@@ -31,6 +31,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "window_hotkey": "alt+q",
     "review_reminders": True,
     "last_review_notice_date": "",
+    "pdf": {
+        "theme": "eye_care",
+        "last_directory": "",
+    },
     "tts": {
         "provider": "sapi",
         "voice_locale": "en-US",
@@ -193,6 +197,17 @@ class SettingsStore:
         tts = self._data.get("tts")
         if not isinstance(tts, dict):
             self._data["tts"] = dict(DEFAULT_SETTINGS["tts"])
+        pdf = self._data.get("pdf")
+        if not isinstance(pdf, dict):
+            pdf = {}
+        theme = str(pdf.get("theme", "eye_care"))
+        if theme not in {"eye_care", "paper", "soft_gray", "white"}:
+            theme = "eye_care"
+        last_directory = pdf.get("last_directory", "")
+        self._data["pdf"] = {
+            "theme": theme,
+            "last_directory": last_directory if isinstance(last_directory, str) else "",
+        }
 
     def _import_legacy(self) -> None:
         if not self.legacy_path.exists():

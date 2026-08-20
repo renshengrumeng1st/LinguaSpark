@@ -12,6 +12,10 @@ from typing import Any
 
 from learning_assistant.core.paths import app_data_dir
 from learning_assistant.domain.models import LearningItem, ReviewRating
+from learning_assistant.domain.pdf_models import PdfAnnotation, PdfTextSelection
+
+
+PDF_ANNOTATION_COLORS = ("yellow", "green", "pink")
 
 
 class LearningRepository:
@@ -92,10 +96,24 @@ class LearningRepository:
                 next_due_at INTEGER NOT NULL,
                 interval_days INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pdf_annotations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_key TEXT NOT NULL,
+                page_index INTEGER NOT NULL,
+                start_index INTEGER NOT NULL,
+                end_index INTEGER NOT NULL,
+                selected_text TEXT NOT NULL,
+                color TEXT NOT NULL,
+                bounds_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(document_key, page_index, start_index, end_index)
+            );
             CREATE INDEX IF NOT EXISTS idx_history_created ON query_history(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_metrics_provider ON request_metrics(provider_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_learning_due ON learning_items(due_at);
             CREATE INDEX IF NOT EXISTS idx_review_item ON review_logs(item_key, reviewed_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_pdf_annotations_document
+            ON pdf_annotations(document_key, page_index);
             """
         )
         db.commit()
@@ -318,3 +336,112 @@ class LearningRepository:
             (provider_id, query_kind, first_byte_ms, total_ms, int(success), int(time.time())),
         )
         self._connection().commit()
+
+    @staticmethod
+    def _pdf_annotation(row: sqlite3.Row) -> PdfAnnotation:
+        try:
+            raw_bounds = json.loads(row["bounds_json"])
+            bounds = tuple(
+                tuple(float(value) for value in bound)
+                for bound in raw_bounds
+                if isinstance(bound, (list, tuple)) and len(bound) == 4
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            bounds = ()
+        return PdfAnnotation(
+            id=int(row["id"]),
+            document_key=str(row["document_key"]),
+            page_index=int(row["page_index"]),
+            start_index=int(row["start_index"]),
+            end_index=int(row["end_index"]),
+            selected_text=str(row["selected_text"]),
+            color=str(row["color"]),
+            bounds=bounds,
+            created_at=int(row["created_at"]),
+        )
+
+    def add_pdf_annotation(
+        self,
+        document_key: str,
+        selection: PdfTextSelection,
+        color: str,
+        now: int | None = None,
+    ) -> PdfAnnotation:
+        if color not in PDF_ANNOTATION_COLORS:
+            allowed = ", ".join(PDF_ANNOTATION_COLORS)
+            raise ValueError(f"PDF annotation color must be one of: {allowed}")
+        timestamp = int(time.time()) if now is None else int(now)
+        db = self._connection()
+        db.execute(
+            """INSERT INTO pdf_annotations(
+                document_key, page_index, start_index, end_index,
+                selected_text, color, bounds_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_key, page_index, start_index, end_index)
+            DO UPDATE SET selected_text = excluded.selected_text,
+                          color = excluded.color,
+                          bounds_json = excluded.bounds_json,
+                          created_at = excluded.created_at""",
+            (
+                document_key,
+                int(selection.page_index),
+                int(selection.start_index),
+                int(selection.end_index),
+                selection.text,
+                color,
+                json.dumps(selection.bounds, separators=(",", ":")),
+                timestamp,
+            ),
+        )
+        db.commit()
+        row = db.execute(
+            """SELECT * FROM pdf_annotations
+               WHERE document_key = ? AND page_index = ?
+                 AND start_index = ? AND end_index = ?""",
+            (
+                document_key,
+                int(selection.page_index),
+                int(selection.start_index),
+                int(selection.end_index),
+            ),
+        ).fetchone()
+        return self._pdf_annotation(row)
+
+    def pdf_annotations(
+        self, document_key: str, page_index: int | None = None
+    ) -> list[PdfAnnotation]:
+        if page_index is None:
+            rows = self._connection().execute(
+                """SELECT * FROM pdf_annotations WHERE document_key = ?
+                   ORDER BY page_index, start_index, id""",
+                (document_key,),
+            ).fetchall()
+        else:
+            rows = self._connection().execute(
+                """SELECT * FROM pdf_annotations
+                   WHERE document_key = ? AND page_index = ?
+                   ORDER BY start_index, id""",
+                (document_key, int(page_index)),
+            ).fetchall()
+        return [self._pdf_annotation(row) for row in rows]
+
+    def delete_pdf_annotation(
+        self,
+        document_key: str,
+        page_index: int,
+        start_index: int,
+        end_index: int,
+    ) -> bool:
+        cursor = self._connection().execute(
+            """DELETE FROM pdf_annotations
+               WHERE document_key = ? AND page_index = ?
+                 AND start_index = ? AND end_index = ?""",
+            (
+                document_key,
+                int(page_index),
+                int(start_index),
+                int(end_index),
+            ),
+        )
+        self._connection().commit()
+        return cursor.rowcount > 0

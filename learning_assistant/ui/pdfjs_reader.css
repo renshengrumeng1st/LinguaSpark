@@ -1,0 +1,62 @@
+:root {
+    --linguaspark-paper: #eaf4e2;
+    --linguaspark-workspace: #dfead8;
+}
+
+#toolbarContainer,
+#sidebarContainer,
+#secondaryToolbar,
+#findbar,
+#editorModeButtons,
+#printContainer {
+    display: none !important;
+}
+
+#mainContainer,
+#viewerContainer {
+    inset: 0 !important;
+    top: 0 !important;
+}
+
+html,
+body,
+#outerContainer,
+#mainContainer,
+#viewerContainer,
+.pdfViewer {
+    background: var(--linguaspark-workspace) !important;
+}
+
+.pdfViewer .page {
+    background-color: var(--linguaspark-paper) !important;
+}
+
+.pdfViewer .page canvas {
+    mix-blend-mode: multiply;
+}
+
+.pdfViewer .page:not(:has(.textLayer)) {
+    cursor: default;
+}
+
+.textLayer {
+    cursor: text !important;
+    z-index: 4 !important;
+}
+
+.textLayer ::selection {
+    background: rgba(70, 143, 201, 0.62) !important;
+}
+
+.linguaspark-annotation-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 3;
+}
+
+.linguaspark-annotation {
+    position: absolute;
+    pointer-events: none;
+    border-radius: 2px;
+}

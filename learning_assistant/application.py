@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import sys
+from collections.abc import Callable
 
 from PySide6.QtCore import QDate, QPoint, QTimer
 from PySide6.QtGui import QAction, QIcon
@@ -13,16 +13,68 @@ from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 from learning_assistant.controller import LearningController
 from learning_assistant.core.paths import project_root
 from learning_assistant.core.settings import SettingsStore
+from learning_assistant.pdf_controller import PdfTranslationController
 from learning_assistant.services.dictionary import DictionaryRepository
+from learning_assistant.services.pdf_translation import QtPdfTranslationClient
 from learning_assistant.services.selection import GlobalHotkeyService, SelectionService
 from learning_assistant.services.speech import SpeechService
 from learning_assistant.storage.learning_repository import LearningRepository
 from learning_assistant.ui.main_window import MainWindow
+from learning_assistant.ui.mode_chooser import ModeChooser
+from learning_assistant.ui.pdf_reader_window import PdfReaderWindow
 from learning_assistant.ui.selection_popup import SelectionPopup
 from learning_assistant.ui.theme import APP_QSS
 
 
 logger = logging.getLogger(__name__)
+
+
+class ApplicationModeRouter:
+    """Lazily creates mode windows and keeps only one mode visible."""
+
+    def __init__(
+        self,
+        compact_factory: Callable[[], MainWindow],
+        pdf_factory: Callable[[], PdfReaderWindow],
+    ):
+        self._compact_factory = compact_factory
+        self._pdf_factory = pdf_factory
+        self.chooser = ModeChooser()
+        self.compact_window: MainWindow | None = None
+        self.pdf_window: PdfReaderWindow | None = None
+        self.chooser.compact_requested.connect(self.show_compact)
+        self.chooser.pdf_requested.connect(self.show_pdf)
+
+    def show_chooser(self) -> None:
+        if self.compact_window:
+            self.compact_window.hide()
+        if self.pdf_window:
+            self.pdf_window.hide()
+        self.chooser.show_front()
+
+    def show_compact(self) -> MainWindow:
+        if self.compact_window is None:
+            self.compact_window = self._compact_factory()
+        if self.pdf_window:
+            self.pdf_window.hide()
+        self.chooser.hide()
+        self.compact_window.show_front()
+        return self.compact_window
+
+    def toggle_compact(self) -> MainWindow:
+        if self.compact_window is not None and self.compact_window.isVisible():
+            self.compact_window.hide()
+            return self.compact_window
+        return self.show_compact()
+
+    def show_pdf(self) -> PdfReaderWindow:
+        if self.pdf_window is None:
+            self.pdf_window = self._pdf_factory()
+        if self.compact_window:
+            self.compact_window.hide()
+        self.chooser.hide()
+        self.pdf_window.show_front()
+        return self.pdf_window
 
 
 class LearningAssistantApplication:
@@ -43,7 +95,8 @@ class LearningAssistantApplication:
             repository=self.repository,
         )
         self.speech = SpeechService(self.settings)
-        self.main_window = MainWindow(self.controller, self.settings, self.speech)
+        self.main_window: MainWindow | None = None
+        self.pdf_client: QtPdfTranslationClient | None = None
         self.popup = SelectionPopup(self.controller)
         self.selection = SelectionService()
         self._review_message_active = False
@@ -51,6 +104,10 @@ class LearningAssistantApplication:
             "window": str(self.settings.get("window_hotkey", "alt+q")),
             "selection": str(self.settings.get("selection_hotkey", "alt+w")),
         })
+        self.mode_router = ApplicationModeRouter(
+            self._create_compact_window,
+            self._create_pdf_window,
+        )
         self._wire()
         self.tray = self._create_tray()
         self._refresh_review_action(self.repository.due_learning_count())
@@ -64,11 +121,43 @@ class LearningAssistantApplication:
         self.selection.captured.connect(self._selection_captured)
         self.selection.failed.connect(self._selection_failed)
         self.popup.open_main_requested.connect(self._open_from_popup)
-        self.popup.speak_requested.connect(self.main_window._speak)
-        self.main_window.review_count_changed.connect(self._refresh_review_action)
-        self.main_window.settings_opened.connect(self.hotkeys.stop)
-        self.main_window.settings_closed.connect(self._reload_hotkeys)
+        self.popup.speak_requested.connect(self._speak_from_popup)
         self.hotkeys.registration_failed.connect(self._hotkey_registration_failed)
+
+    def _create_compact_window(self) -> MainWindow:
+        window = MainWindow(self.controller, self.settings, self.speech)
+        self.main_window = window
+        window.review_count_changed.connect(self._refresh_review_action)
+        window.settings_opened.connect(self.hotkeys.stop)
+        window.settings_closed.connect(self._reload_hotkeys)
+        return window
+
+    def _create_pdf_window(self) -> PdfReaderWindow:
+        window = PdfReaderWindow(self.settings, self._create_pdf_controller)
+        window.compact_mode_requested.connect(self.mode_router.show_compact)
+        window.settings_requested.connect(self._open_settings)
+        return window
+
+    def _create_pdf_controller(self) -> PdfTranslationController:
+        if self.pdf_client is None:
+            self.pdf_client = QtPdfTranslationClient(self.qt)
+        return PdfTranslationController(
+            self.settings,
+            self.repository,
+            self.pdf_client,
+        )
+
+    def _ensure_compact_window(self) -> MainWindow:
+        if self.mode_router.compact_window is None:
+            self.mode_router.compact_window = self._create_compact_window()
+        return self.mode_router.compact_window
+
+    def _speak_from_popup(self, text: str) -> None:
+        locale = str(self.settings.get("tts", {}).get("voice_locale", "en-US"))
+        self.speech.speak(text, locale)
+
+    def _open_settings(self) -> None:
+        self._ensure_compact_window().open_settings()
 
     def _create_tray(self) -> QSystemTrayIcon:
         icon_path = project_root() / "assets" / "icon.ico"
@@ -82,22 +171,31 @@ class LearningAssistantApplication:
         selection = self._hotkey_label("selection_hotkey", "Alt+W")
         tray.setToolTip(f"LinguaSpark · {window} 呼出 · {selection} 划词")
         menu = QMenu()
-        show_action = QAction("显示主窗口", menu)
-        show_action.triggered.connect(self.main_window.show_front)
+        show_action = QAction("选择模式", menu)
+        show_action.triggered.connect(self.mode_router.show_chooser)
+        compact_action = QAction("便捷模式", menu)
+        compact_action.triggered.connect(self.mode_router.show_compact)
+        pdf_action = QAction("PDF 阅读模式", menu)
+        pdf_action.triggered.connect(self.mode_router.show_pdf)
         settings_action = QAction("设置", menu)
-        settings_action.triggered.connect(self.main_window.open_settings)
+        settings_action.triggered.connect(self._open_settings)
         self.review_action = QAction("今日复习", menu)
-        self.review_action.triggered.connect(self.main_window.open_review)
+        self.review_action.triggered.connect(
+            lambda: self._ensure_compact_window().open_review()
+        )
         quit_action = QAction("退出", menu)
         quit_action.triggered.connect(self.quit)
         menu.addAction(show_action)
+        menu.addAction(compact_action)
+        menu.addAction(pdf_action)
+        menu.addSeparator()
         menu.addAction(self.review_action)
         menu.addAction(settings_action)
         menu.addSeparator()
         menu.addAction(quit_action)
         tray.setContextMenu(menu)
         tray.activated.connect(
-            lambda reason: self.main_window.toggle_visibility()
+            lambda reason: self.mode_router.show_chooser()
             if reason == QSystemTrayIcon.Trigger else None
         )
         tray.messageClicked.connect(self._tray_message_clicked)
@@ -117,10 +215,11 @@ class LearningAssistantApplication:
     def _tray_message_clicked(self) -> None:
         if self._review_message_active:
             self._review_message_active = False
-            self.main_window.open_review()
+            self._ensure_compact_window().open_review()
 
     def _check_review_reminder(self) -> None:
-        count = self.main_window.refresh_review_count()
+        count = self.repository.due_learning_count()
+        self._refresh_review_action(count)
         if not count or not bool(self.settings.get("review_reminders", True)):
             return
         today = QDate.currentDate().toString("yyyy-MM-dd")
@@ -138,9 +237,17 @@ class LearningAssistantApplication:
 
     def _hotkey(self, name: str) -> None:
         if name == "window":
-            self.main_window.toggle_visibility()
+            self.mode_router.toggle_compact()
         elif name == "selection":
-            self.selection.request()
+            pdf_window = self.mode_router.pdf_window
+            if (
+                pdf_window is not None
+                and pdf_window.isVisible()
+                and pdf_window.has_active_selection()
+            ):
+                pdf_window.translate_active_selection()
+            else:
+                self.selection.request()
 
     def _reload_hotkeys(self) -> None:
         self.hotkeys.stop()
@@ -160,13 +267,15 @@ class LearningAssistantApplication:
     def _hotkey_registration_failed(self, name: str, binding: str) -> None:
         label = "显示窗口" if name == "window" else "划词翻译"
         message = f"{label}快捷键 {binding} 已被其他程序占用，请在设置中更换。"
-        self.main_window.status.setText(message)
+        if self.main_window is not None:
+            self.main_window.status.setText(message)
         self.tray.showMessage("快捷键注册失败", message, QSystemTrayIcon.Warning, 4500)
 
     def _selection_captured(self, text: str, context: str, x: int, y: int) -> None:
         self.popup.show_query(text, QPoint(x, y))
-        self.main_window.input.setPlainText(text)
-        self.main_window._last_auto_text = text
+        main_window = self._ensure_compact_window()
+        main_window.input.setPlainText(text)
+        main_window._last_auto_text = text
         self.controller.submit(text, context=context)
 
     def _selection_failed(self, message: str) -> None:
@@ -175,20 +284,25 @@ class LearningAssistantApplication:
 
     def _open_from_popup(self, text: str) -> None:
         self.popup.hide()
-        self.main_window.input.setPlainText(text)
-        self.main_window.show_front()
+        main_window = self.mode_router.show_compact()
+        main_window.input.setPlainText(text)
 
     def run(self) -> int:
         self.hotkeys.start()
         self.review_timer.start()
         if not self.dictionary.available:
             logger.warning("Local dictionary database is missing")
-        self.main_window.show_front()
+        self.mode_router.show_chooser()
         return self.qt.exec()
 
     def quit(self) -> None:
         self.hotkeys.stop()
         self.controller.cancel()
+        pdf_window = self.mode_router.pdf_window
+        if pdf_window is not None:
+            pdf_window.close_all_tabs()
+        if self.pdf_client is not None:
+            self.pdf_client.cancel()
         self.speech.close()
         self.tray.hide()
         self.qt.quit()
