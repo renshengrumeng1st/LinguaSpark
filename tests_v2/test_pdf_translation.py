@@ -186,10 +186,42 @@ def test_pdf_controller_persists_and_deletes_current_highlight(
     controller.set_selection(_selection(), "doc")
 
     controller.add_highlight("pink")
-    controller.delete_highlight()
+    deleted = controller.delete_highlight()
+    deleted_again = controller.delete_highlight()
 
     assert changes[0][0].color == "pink"
     assert changes[-1] == []
+    assert deleted is True
+    assert deleted_again is False
+
+
+def test_pdf_controller_refuses_unstable_cross_page_highlight(
+    tmp_path: Path,
+) -> None:
+    """Translation-only selections must never be persisted as one-page marks."""
+    _, controller_module = _pdf_modules()
+    repository = LearningRepository(tmp_path / "learning.sqlite3")
+    controller = controller_module.PdfTranslationController(
+        _settings(tmp_path), repository, FakePdfClient()
+    )
+    failures: list[str] = []
+    controller.translation_failed.connect(failures.append)
+    controller.set_selection(
+        PdfTextSelection(
+            0,
+            -1,
+            -1,
+            "Cross-page sentence.",
+            ((1.0, 2.0, 30.0, 8.0),),
+            can_annotate=False,
+        ),
+        "doc",
+    )
+
+    controller.add_highlight("yellow")
+
+    assert repository.pdf_annotations("doc") == []
+    assert failures == ["当前选区可以翻译，但无法稳定标记"]
 
 
 def test_shared_pdf_client_keeps_tab_requests_isolated_and_disposable(

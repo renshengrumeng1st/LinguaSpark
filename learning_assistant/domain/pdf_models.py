@@ -33,6 +33,7 @@ class PdfTextSelection:
     end_index: int
     text: str
     bounds: PdfBounds = ()
+    can_annotate: bool = True
 
 
 @dataclass(frozen=True, slots=True)

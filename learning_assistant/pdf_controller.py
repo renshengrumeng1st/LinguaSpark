@@ -204,18 +204,24 @@ class PdfTranslationController(QObject):
     def add_highlight(self, color: str) -> None:
         if self._disposed or not self._selection or not self._document_key:
             return
+        if not self._selection.can_annotate:
+            self.translation_failed.emit("当前选区可以翻译，但无法稳定标记")
+            return
         self.repository.add_pdf_annotation(
             self._document_key, self._selection, color
         )
         self.annotations_changed.emit(self.annotations())
 
-    def delete_highlight(self) -> None:
+    def delete_highlight(self) -> bool:
         if self._disposed or not self._selection or not self._document_key:
-            return
-        self.repository.delete_pdf_annotation(
+            return False
+        if not self._selection.can_annotate:
+            return False
+        deleted = self.repository.delete_pdf_annotation(
             self._document_key,
             self._selection.page_index,
             self._selection.start_index,
             self._selection.end_index,
         )
         self.annotations_changed.emit(self.annotations())
+        return deleted

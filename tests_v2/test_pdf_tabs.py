@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QEvent, QObject, Signal
 from PySide6.QtCore import Qt
 
 from learning_assistant.core.settings import SecretStore, SettingsStore
@@ -139,6 +139,16 @@ def test_pdf_window_opens_deduplicates_and_closes_independent_tabs(
 def test_pdf_window_maximizes_and_focus_mode_preserves_active_tab(
     qtbot, tmp_path: Path
 ) -> None:
+    class EscapeConsumer(QObject):
+        def eventFilter(self, watched, event) -> bool:
+            if (
+                event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape
+            ):
+                event.accept()
+                return True
+            return super().eventFilter(watched, event)
+
     path = tmp_path / "focus.pdf"
     _write_pdf(path, "Focused reading.")
     window = PdfReaderWindow(_settings(tmp_path), FakePdfController)
@@ -161,7 +171,10 @@ def test_pdf_window_maximizes_and_focus_mode_preserves_active_tab(
     assert window.tab_widget.tabBar().isHidden()
     assert tab.isVisibleTo(window)
 
-    qtbot.keyClick(window, Qt.Key.Key_Escape)
+    escape_consumer = EscapeConsumer(tab.pdf_view)
+    tab.pdf_view.installEventFilter(escape_consumer)
+    tab.pdf_view.setFocus()
+    qtbot.keyClick(tab.pdf_view, Qt.Key.Key_Escape)
     qtbot.wait(10)
 
     assert window.isMaximized()

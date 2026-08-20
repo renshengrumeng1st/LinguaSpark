@@ -17,6 +17,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtWidgets import QWidget
 
 from learning_assistant.domain.pdf_models import PdfAnnotation, PdfTextSelection
 from learning_assistant.services.pdf_text import document_key, normalize_pdf_selection
@@ -40,6 +41,60 @@ HIGHLIGHT_COLORS = {
 class _PageRect:
     index: int
     rect: QRectF
+
+
+def _visual_line_groups(rects: tuple[QRectF, ...]) -> list[list[QRectF]]:
+    """Group font and glyph fragments that occupy the same visual line."""
+    groups: list[list[QRectF]] = []
+    ordered = sorted(
+        (QRectF(rect) for rect in rects if not rect.isEmpty()),
+        key=lambda rect: (rect.center().y(), rect.left()),
+    )
+    for rect in ordered:
+        best_group: list[QRectF] | None = None
+        best_distance = float("inf")
+        for group in groups:
+            group_center = sum(item.center().y() for item in group) / len(group)
+            typical_height = max(
+                rect.height(), max(item.height() for item in group)
+            )
+            distance = abs(rect.center().y() - group_center)
+            if (
+                distance <= max(2.0, typical_height * 0.8)
+                and distance < best_distance
+            ):
+                best_group = group
+                best_distance = distance
+        if best_group is None:
+            groups.append([rect])
+        else:
+            best_group.append(rect)
+    for group in groups:
+        group.sort(key=lambda rect: rect.left())
+    groups.sort(
+        key=lambda group: (
+            min(rect.top() for rect in group),
+            min(rect.left() for rect in group),
+        )
+    )
+    return groups
+
+
+def _merge_selection_bounds(rects: tuple[QRectF, ...]) -> tuple[QRectF, ...]:
+    """Turn fragmented font runs into readable line-level selection bands."""
+    merged: list[QRectF] = []
+    for group in _visual_line_groups(rects):
+        line_height = max(rect.height() for rect in group)
+        max_gap = max(5.0, line_height * 0.8)
+        current = QRectF(group[0])
+        for rect in group[1:]:
+            if rect.left() - current.right() <= max_gap:
+                current = current.united(rect)
+            else:
+                merged.append(current)
+                current = QRectF(rect)
+        merged.append(current)
+    return tuple(merged)
 
 
 class PdfPageLayout:
@@ -114,6 +169,23 @@ class PdfPageLayout:
         )
 
 
+class _PdfHighlightOverlay(QWidget):
+    """Stable child layer kept above Qt's asynchronous PDF page renderer."""
+
+    def __init__(self, view: "SelectablePdfView") -> None:
+        super().__init__(view.viewport())
+        self._view = view
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        del event
+        painter = QPainter(self)
+        self._view._paint_highlight_overlay(painter)
+        painter.end()
+
+
 class SelectablePdfView(QPdfView):
     selection_changed = Signal(object)
     document_loaded = Signal(str, int)
@@ -139,10 +211,15 @@ class SelectablePdfView(QPdfView):
         self._theme_id = "eye_care"
         self._current_page = -1
         self.verticalScrollBar().valueChanged.connect(self._update_current_page)
+        self.verticalScrollBar().valueChanged.connect(self._refresh_overlay)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
+        self.horizontalScrollBar().valueChanged.connect(self._refresh_overlay)
         self.pageNavigator().currentPageChanged.connect(self._set_current_page)
+        self.zoomFactorChanged.connect(self._refresh_overlay)
         self.viewport().setMouseTracking(True)
         self.viewport().installEventFilter(self)
+        self._overlay = _PdfHighlightOverlay(self)
+        self._refresh_overlay()
 
     @property
     def document_key(self) -> str:
@@ -173,6 +250,7 @@ class SelectablePdfView(QPdfView):
         self._document_key = document_key(self._path)
         self.document_loaded.emit(self._document_key, self._document.pageCount())
         self._update_current_page()
+        self._refresh_overlay()
         return True
 
     def close_document(self) -> None:
@@ -185,6 +263,7 @@ class SelectablePdfView(QPdfView):
         self._drag_start = None
         self._drag_end = None
         self.viewport().update()
+        self._refresh_overlay()
 
     def set_pdf_password(self, password: str) -> bool:
         if not self._path:
@@ -194,7 +273,7 @@ class SelectablePdfView(QPdfView):
 
     def set_annotations(self, annotations: list[PdfAnnotation]) -> None:
         self._annotations = list(annotations)
-        self.viewport().update()
+        self._refresh_overlay()
 
     def set_reading_theme(self, theme_id: str) -> None:
         self._theme_id = theme_id if theme_id in READING_THEMES else "eye_care"
@@ -274,10 +353,20 @@ class SelectablePdfView(QPdfView):
         point: QPointF,
         max_distance: float | None = 10.0,
     ) -> QPointF | None:
+        return self._snap_text_point(page_index, point, max_distance)
+
+    @staticmethod
+    def _point_in_rects(point: QPointF, rects: list[QRectF]) -> bool:
+        return any(rect.contains(point) for rect in rects)
+
+    @staticmethod
+    def _closest_point_in_rects(
+        point: QPointF, rects: list[QRectF]
+    ) -> tuple[QPointF | None, float]:
         closest: QPointF | None = None
         closest_distance = float("inf")
         inset = 0.5
-        for rect in self._text_bounds(page_index):
+        for rect in rects:
             left = min(rect.right(), rect.left() + inset)
             right = max(rect.left(), rect.right() - inset)
             top = min(rect.bottom(), rect.top() + inset)
@@ -292,9 +381,70 @@ class SelectablePdfView(QPdfView):
             if distance < closest_distance:
                 closest = candidate
                 closest_distance = distance
+        return closest, closest_distance
+
+    def _snap_text_point(
+        self,
+        page_index: int,
+        point: QPointF,
+        max_distance: float | None = 10.0,
+        vertical_preference: int = 0,
+    ) -> QPointF | None:
+        groups = _visual_line_groups(self._text_bounds(page_index))
+        if not groups:
+            return None
+        containing = [
+            group for group in groups if self._point_in_rects(point, group)
+        ]
+        candidates = containing
+        if not candidates:
+            if vertical_preference > 0:
+                candidates = [
+                    group
+                    for group in groups
+                    if max(rect.center().y() for rect in group) >= point.y()
+                ]
+            elif vertical_preference < 0:
+                candidates = [
+                    group
+                    for group in groups
+                    if min(rect.center().y() for rect in group) <= point.y()
+                ]
+        if not candidates:
+            candidates = groups
+        closest: QPointF | None = None
+        closest_distance = float("inf")
+        for group in candidates:
+            candidate, distance = self._closest_point_in_rects(point, group)
+            if distance < closest_distance:
+                closest = candidate
+                closest_distance = distance
         if max_distance is None or closest_distance <= max_distance:
             return closest
         return None
+
+    def _snap_drag_points(
+        self,
+        page_index: int,
+        start: QPointF,
+        end: QPointF,
+    ) -> tuple[QPointF, QPointF] | None:
+        delta_y = end.y() - start.y()
+        direction = 1 if delta_y > 1.0 else -1 if delta_y < -1.0 else 0
+        snapped_start = self._snap_text_point(
+            page_index,
+            start,
+            vertical_preference=direction,
+        )
+        snapped_end = self._snap_text_point(
+            page_index,
+            end,
+            max_distance=None,
+            vertical_preference=-direction,
+        )
+        if snapped_start is None or snapped_end is None:
+            return None
+        return snapped_start, snapped_end
 
     def has_selectable_text_near(self, position: QPointF) -> bool:
         hit = self._hit(position)
@@ -309,29 +459,37 @@ class SelectablePdfView(QPdfView):
     ) -> PdfTextSelection | None:
         if start[0] != end[0]:
             return None
-        selected = self._document.getSelection(start[0], start[1], end[1])
-        if not selected.isValid():
-            snapped_start = self._nearest_text_point(start[0], start[1])
-            snapped_end = self._nearest_text_point(
-                end[0], end[1], max_distance=None
-            )
-            if snapped_start is None or snapped_end is None:
-                return None
-            selected = self._document.getSelection(
-                start[0], snapped_start, snapped_end
-            )
+        snapped = self._snap_drag_points(start[0], start[1], end[1])
+        if snapped is None:
+            return None
+        selected = self._document.getSelection(start[0], snapped[0], snapped[1])
         if not selected.isValid():
             return None
+        start_index, end_index = selected.startIndex(), selected.endIndex()
+        if start_index > end_index:
+            start_index, end_index = end_index, start_index
+        length = end_index - start_index
+        if length > 0:
+            stable = self._document.getSelectionAtIndex(
+                start[0], start_index, length
+            )
+            if stable.isValid():
+                selected = stable
         try:
             text = normalize_pdf_selection(selected.text())
         except ValueError:
             return None
         if not text:
             return None
-        bounds: list[tuple[float, float, float, float]] = []
+        raw_bounds: list[QRectF] = []
         for polygon in selected.bounds():
             rect = polygon.boundingRect()
-            bounds.append((rect.x(), rect.y(), rect.width(), rect.height()))
+            if not rect.isEmpty():
+                raw_bounds.append(rect)
+        bounds = tuple(
+            (rect.x(), rect.y(), rect.width(), rect.height())
+            for rect in _merge_selection_bounds(tuple(raw_bounds))
+        )
         start_index, end_index = selected.startIndex(), selected.endIndex()
         if start_index > end_index:
             start_index, end_index = end_index, start_index
@@ -348,6 +506,8 @@ class SelectablePdfView(QPdfView):
         self.viewport().setCursor(shape)
 
     def eventFilter(self, watched, event) -> bool:
+        if watched is self.viewport() and event.type() == QEvent.Type.Resize:
+            self._refresh_overlay()
         if (
             watched is self.viewport()
             and event.type() == QEvent.Type.MouseMove
@@ -367,7 +527,7 @@ class SelectablePdfView(QPdfView):
             self._drag_start = hit
             self._drag_end = self._drag_start
             self._selection = None
-            self.viewport().update()
+            self._refresh_overlay()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -380,7 +540,7 @@ class SelectablePdfView(QPdfView):
                 self._selection = self._selection_for_drag(
                     self._drag_start, self._drag_end
                 )
-                self.viewport().update()
+                self._refresh_overlay()
             event.accept()
             return
         self._update_hover_cursor(event.position())
@@ -402,7 +562,7 @@ class SelectablePdfView(QPdfView):
             return
         self._selection = self._selection_for_drag(start, end)
         self.selection_changed.emit(self._selection)
-        self.viewport().update()
+        self._refresh_overlay()
         self._update_hover_cursor(event.position())
         event.accept()
 
@@ -418,7 +578,37 @@ class SelectablePdfView(QPdfView):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        self._refresh_overlay()
         self._update_current_page()
+
+    def _refresh_overlay(self, *_args) -> None:
+        overlay = getattr(self, "_overlay", None)
+        if overlay is None:
+            return
+        overlay.setGeometry(self.viewport().rect())
+        overlay.raise_()
+        overlay.show()
+        overlay.update()
+
+    def _paint_highlight_overlay(self, painter: QPainter) -> None:
+        if not self._document.pageCount():
+            return
+        layout = self._layout()
+        scroll_y = self.verticalScrollBar().value()
+        scroll_x = self.horizontalScrollBar().value()
+        painter.setPen(Qt.PenStyle.NoPen)
+        for annotation in self._annotations:
+            painter.setBrush(HIGHLIGHT_COLORS.get(annotation.color, QColor()))
+            for bound in annotation.bounds:
+                painter.drawRect(layout.pdf_rect_to_viewport(
+                    annotation.page_index, bound, scroll_y, scroll_x
+                ))
+        if self._selection:
+            painter.setBrush(QColor(46, 134, 193, 150))
+            for bound in self._selection.bounds:
+                painter.drawRect(layout.pdf_rect_to_viewport(
+                    self._selection.page_index, bound, scroll_y, scroll_x
+                ))
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
@@ -444,17 +634,4 @@ class SelectablePdfView(QPdfView):
                     painter.drawRect(rect)
             painter.restore()
 
-        painter.setPen(Qt.PenStyle.NoPen)
-        for annotation in self._annotations:
-            painter.setBrush(HIGHLIGHT_COLORS.get(annotation.color, QColor()))
-            for bound in annotation.bounds:
-                painter.drawRect(layout.pdf_rect_to_viewport(
-                    annotation.page_index, bound, scroll_y, scroll_x
-                ))
-        if self._selection:
-            painter.setBrush(QColor(46, 134, 193, 150))
-            for bound in self._selection.bounds:
-                painter.drawRect(layout.pdf_rect_to_viewport(
-                    self._selection.page_index, bound, scroll_y, scroll_x
-                ))
         painter.end()

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtWidgets import QApplication
 
 from learning_assistant.core.settings import SecretStore, SettingsStore
 from learning_assistant.domain.pdf_models import (
@@ -14,6 +15,7 @@ from learning_assistant.domain.pdf_models import (
 )
 from learning_assistant.ui.pdf_reader_window import PdfReaderWindow
 from learning_assistant.ui.pdf_reader_tab import PdfReaderTab
+from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter
 
 
 class FakePdfController(QObject):
@@ -46,6 +48,7 @@ class FakePdfController(QObject):
 
     def delete_highlight(self) -> None:
         self.delete_calls += 1
+        return True
 
     def annotations(self):
         return []
@@ -87,6 +90,14 @@ def test_pdf_reader_tab_closes_only_its_controller(qtbot, tmp_path: Path) -> Non
     tab.close_session()
 
     assert controller.dispose_calls == 1
+
+
+def test_pdf_reader_tab_uses_the_pdfjs_production_adapter(qtbot, tmp_path: Path) -> None:
+    """Reconnecting the legacy coordinate view must fail this integration test."""
+    tab = PdfReaderTab(FakePdfController(), _settings(tmp_path))
+    qtbot.addWidget(tab)
+
+    assert isinstance(tab.pdf_view, PdfJsViewAdapter)
 
 
 def test_pdf_reader_defaults_to_eye_care_and_hides_phrase_panel(
@@ -143,7 +154,18 @@ def test_cached_completion_populates_translation_and_phrases(
     assert "缓存" in tab.status.text()
 
 
-def test_selection_actions_route_and_copy(qtbot, tmp_path: Path) -> None:
+def test_selection_actions_route_and_copy(qtbot, tmp_path: Path, monkeypatch) -> None:
+    class TestClipboard:
+        value = ""
+
+        def setText(self, value: str) -> None:
+            self.value = value
+
+        def text(self) -> str:
+            return self.value
+
+    clipboard = TestClipboard()
+    monkeypatch.setattr(QApplication, "clipboard", lambda: clipboard)
     controller = FakePdfController()
     tab = PdfReaderTab(controller, _settings(tmp_path))
     qtbot.addWidget(tab)
@@ -162,6 +184,84 @@ def test_selection_actions_route_and_copy(qtbot, tmp_path: Path) -> None:
     assert controller.highlight_colors == ["green"]
     assert controller.delete_calls == 1
     assert tab.clipboard_text() == "可复制译文"
+
+
+def test_removing_a_mark_clears_the_native_selection_and_disables_actions(
+    qtbot, tmp_path: Path
+) -> None:
+    """A deleted mark must not remain visible as the browser's blue selection."""
+    controller = FakePdfController()
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
+    tab.pdf_view.selection_changed.emit(_selection())
+
+    tab.remove_highlight_button.click()
+
+    assert controller.delete_calls == 1
+    assert controller.selection is None
+    assert tab.pdf_view.current_selection() is None
+    assert not tab.remove_highlight_button.isEnabled()
+    assert tab.status.text() == "标记已移除"
+
+
+def test_translation_sidebar_uses_the_same_paper_color_as_the_pdf(
+    qtbot, tmp_path: Path
+) -> None:
+    """A white sidebar beside tinted paper must fail this visual contract."""
+    tab = PdfReaderTab(FakePdfController(), _settings(tmp_path))
+    qtbot.addWidget(tab)
+    tab.resize(1000, 700)
+    tab.set_theme("paper")
+    tab.show()
+    qtbot.wait(20)
+
+    pixmap = tab.translation_panel.grab()
+    image = pixmap.toImage()
+    dpr = pixmap.devicePixelRatio()
+    color = image.pixelColor(
+        round(8 * dpr),
+        round(tab.translation_panel.height() * dpr / 2),
+    )
+
+    assert (color.red(), color.green(), color.blue()) == pytest.approx(
+        (247, 241, 227),
+        abs=3,
+    )
+
+
+def test_cross_page_selection_stays_translatable_but_disables_marking(
+    qtbot, tmp_path: Path
+) -> None:
+    """A selection without stable one-page indices must not write a false mark."""
+    controller = FakePdfController()
+    tab = PdfReaderTab(controller, _settings(tmp_path))
+    qtbot.addWidget(tab)
+    selection = PdfTextSelection(
+        0,
+        -1,
+        -1,
+        "Cross-page sentence.",
+        ((1.0, 2.0, 30.0, 8.0),),
+        can_annotate=False,
+    )
+
+    tab.pdf_view.selection_changed.emit(selection)
+
+    assert tab.translate_button.isEnabled()
+    assert not tab.highlight_combo.isEnabled()
+    assert not tab.highlight_button.isEnabled()
+    assert not tab.remove_highlight_button.isEnabled()
+    assert "可翻译" in tab.status.text()
+
+
+def test_pdfjs_selection_feedback_is_visible_in_the_tab(qtbot, tmp_path: Path) -> None:
+    """Reader-level failures must reach the existing status surface."""
+    tab = PdfReaderTab(FakePdfController(), _settings(tmp_path))
+    qtbot.addWidget(tab)
+
+    tab.pdf_view.selection_feedback.emit("当前页面没有可选择文字")
+
+    assert tab.status.text() == "当前页面没有可选择文字"
 
 
 def test_document_load_sets_controller_identity_before_loading_marks(

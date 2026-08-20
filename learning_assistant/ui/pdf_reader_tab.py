@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,7 +23,10 @@ from PySide6.QtCore import Qt
 from learning_assistant.core.settings import SettingsStore
 from learning_assistant.domain.pdf_models import PdfPhrase, PdfTranslationResult
 from learning_assistant.pdf_controller import PdfTranslationController
-from learning_assistant.ui.pdf_view import READING_THEMES, SelectablePdfView
+from learning_assistant.ui.pdf_themes import READING_THEMES
+
+if TYPE_CHECKING:
+    from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter
 
 
 class PdfReaderTab(QWidget):
@@ -46,6 +50,8 @@ class PdfReaderTab(QWidget):
         self.set_theme(str(settings.get("pdf", {}).get("theme", "eye_care")))
 
     def _build_ui(self) -> None:
+        from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter
+
         self.setObjectName("pdfReaderTab")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -53,7 +59,7 @@ class PdfReaderTab(QWidget):
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
-        self.pdf_view = SelectablePdfView()
+        self.pdf_view = PdfJsViewAdapter()
         self.pdf_view.setObjectName("pdfDocument")
         self.pdf_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -130,12 +136,11 @@ class PdfReaderTab(QWidget):
         self.translate_button.clicked.connect(self.translate_active_selection)
         self.copy_button.clicked.connect(self._copy_translation)
         self.highlight_button.clicked.connect(self._add_highlight)
-        self.remove_highlight_button.clicked.connect(
-            self.controller.delete_highlight
-        )
+        self.remove_highlight_button.clicked.connect(self._remove_highlight)
         self.pdf_view.selection_changed.connect(self._selection_changed)
         self.pdf_view.document_loaded.connect(self._document_loaded)
         self.pdf_view.load_failed.connect(self.status.setText)
+        self.pdf_view.selection_feedback.connect(self.status.setText)
         self.controller.translation_started.connect(self._translation_started)
         self.controller.translation_partial.connect(self._translation_partial)
         self.controller.phrase_ready.connect(self._phrase_ready)
@@ -168,7 +173,7 @@ class PdfReaderTab(QWidget):
             f"""
             QWidget#pdfReaderTab {{ background: {color}; color: #1f2937; }}
             QFrame#translationPanel {{
-                background: rgba(255, 255, 255, 210);
+                background-color: {color};
                 border: 1px solid rgba(107, 114, 128, 45);
                 border-radius: 12px;
             }}
@@ -193,17 +198,29 @@ class PdfReaderTab(QWidget):
             self.source.clear()
             self.status.setText("请拖动选择一段文字")
             return
+        self._set_selection_actions_enabled(True, selection.can_annotate)
         self.source.setPlainText(selection.text)
-        self.status.setText("已选择 · 按 Alt+W 翻译")
+        self.status.setText(
+            "已选择 · 按 Alt+W 翻译"
+            if selection.can_annotate
+            else "已选择 · 可翻译，跨页选区暂不支持标记"
+        )
 
-    def _set_selection_actions_enabled(self, enabled: bool) -> None:
+    def _set_selection_actions_enabled(
+        self,
+        enabled: bool,
+        can_annotate: bool | None = None,
+    ) -> None:
+        self.translate_button.setEnabled(enabled)
+        marking_enabled = enabled and (
+            True if can_annotate is None else can_annotate
+        )
         for widget in (
-            self.translate_button,
             self.highlight_combo,
             self.highlight_button,
             self.remove_highlight_button,
         ):
-            widget.setEnabled(enabled)
+            widget.setEnabled(marking_enabled)
 
     def has_active_selection(self) -> bool:
         return self.controller.selection is not None
@@ -261,6 +278,13 @@ class PdfReaderTab(QWidget):
     def _add_highlight(self) -> None:
         color = str(self.highlight_combo.currentData() or "yellow")
         self.controller.add_highlight(color)
+
+    def _remove_highlight(self) -> None:
+        if self.controller.delete_highlight():
+            self.pdf_view.clear_selection()
+            self.status.setText("标记已移除")
+            return
+        self.status.setText("当前选区没有可移除的标记")
 
     def _copy_translation(self) -> None:
         text = self.translation.toPlainText().strip()

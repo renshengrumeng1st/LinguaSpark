@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from PySide6.QtWidgets import QApplication, QWidget
@@ -10,6 +13,25 @@ from learning_assistant.application import (
 )
 from learning_assistant.core.settings import SecretStore, SettingsStore
 from learning_assistant.storage.learning_repository import LearningRepository
+
+
+def test_importing_application_does_not_eagerly_load_qt_webengine() -> None:
+    """Compact-mode cold start must not pay Chromium's import cost."""
+    project_root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import learning_assistant.application; "
+            "print('PySide6.QtWebEngineWidgets' in sys.modules)",
+        ],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "False"
 
 
 class FakeWindow(QWidget):
@@ -104,17 +126,24 @@ def test_alt_w_falls_back_without_visible_pdf_selection(qtbot):
     assert selection.request_calls == 1
 
 
-def test_window_hotkey_opens_compact_mode_directly():
-    calls: list[str] = []
+def test_window_hotkey_toggles_compact_mode_visibility(qtbot):
+    router = ApplicationModeRouter(FakeWindow, FakeWindow)
+    qtbot.addWidget(router.chooser)
     application = LearningAssistantApplication.__new__(LearningAssistantApplication)
-    application.mode_router = SimpleNamespace(
-        pdf_window=None,
-        show_compact=lambda: calls.append("compact"),
-    )
+    application.mode_router = router
 
     application._hotkey("window")
+    compact = router.compact_window
+    assert compact is not None
+    qtbot.addWidget(compact)
+    assert compact.isVisible()
 
-    assert calls == ["compact"]
+    application._hotkey("window")
+    assert not compact.isVisible()
+
+    application._hotkey("window")
+    assert compact.isVisible()
+    assert compact.front_calls == 2
 
 
 def test_pdf_controller_factory_shares_one_network_client(qtbot, tmp_path):

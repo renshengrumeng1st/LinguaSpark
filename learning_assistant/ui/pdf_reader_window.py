@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent, QKeyEvent
+from PySide6.QtGui import QCloseEvent, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -57,6 +57,13 @@ class PdfReaderWindow(QMainWindow):
         self.setMinimumSize(900, 600)
         self._build_ui()
         self._connect()
+        self._focus_escape_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Escape), self
+        )
+        self._focus_escape_shortcut.setContext(
+            Qt.ShortcutContext.WindowShortcut
+        )
+        self._focus_escape_shortcut.activated.connect(self.exit_focus_mode)
         self._load_pdf_preferences()
         self._sync_empty_state()
 

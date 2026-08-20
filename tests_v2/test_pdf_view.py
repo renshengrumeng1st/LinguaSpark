@@ -107,6 +107,138 @@ def test_page_layout_scales_pdf_coordinates_with_zoom() -> None:
     assert point.y() == pytest.approx(200.0)
 
 
+def test_selection_bounds_merge_nearby_formula_runs_per_visual_line() -> None:
+    pdf_view = _pdf_view_module()
+    fragments = (
+        QRectF(10, 10, 30, 8),
+        QRectF(43, 11, 5, 6),
+        QRectF(51, 13, 2, 3),
+        QRectF(80, 10, 20, 8),
+        QRectF(10, 26, 22, 8),
+        QRectF(36, 27, 8, 6),
+    )
+
+    merged = pdf_view._merge_selection_bounds(fragments)
+    geometry = [
+        (rect.x(), rect.y(), rect.width(), rect.height()) for rect in merged
+    ]
+
+    assert geometry == [
+        (10.0, 10.0, 43.0, 8.0),
+        (80.0, 10.0, 20.0, 8.0),
+        (10.0, 26.0, 34.0, 8.0),
+    ]
+
+
+def test_downward_drag_from_line_gap_starts_on_next_visual_line(
+    qtbot, monkeypatch
+) -> None:
+    pdf_view = _pdf_view_module()
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    monkeypatch.setattr(
+        view,
+        "_text_bounds",
+        lambda _page: (
+            QRectF(10, 10, 40, 7),
+            QRectF(10, 24, 40, 7),
+        ),
+    )
+
+    snapped = view._snap_drag_points(
+        0,
+        QPointF(20, 19),
+        QPointF(45, 35),
+    )
+
+    assert snapped is not None
+    start, end = snapped
+    assert 24 < start.y() < 31
+    assert 24 < end.y() < 31
+
+
+def test_coordinate_selection_is_stabilized_by_qt_indices_and_merged(
+    qtbot, monkeypatch
+) -> None:
+    pdf_view = _pdf_view_module()
+
+    class FakeSelection:
+        def __init__(self, text, start, end, bounds):
+            self._text = text
+            self._start = start
+            self._end = end
+            self._bounds = bounds
+
+        def isValid(self):
+            return True
+
+        def text(self):
+            return self._text
+
+        def startIndex(self):
+            return self._start
+
+        def endIndex(self):
+            return self._end
+
+        def bounds(self):
+            return self._bounds
+
+    class FakePolygon:
+        def __init__(self, rect):
+            self._rect = rect
+
+        def boundingRect(self):
+            return self._rect
+
+    class FakeDocument:
+        def __init__(self):
+            self.index_calls = []
+
+        def getSelection(self, _page, _start, _end):
+            return FakeSelection(
+                "unstable text",
+                100,
+                130,
+                (FakePolygon(QRectF(5, 5, 90, 8)),),
+            )
+
+        def getSelectionAtIndex(self, page, start, length):
+            self.index_calls.append((page, start, length))
+            return FakeSelection(
+                "stable formula text",
+                100,
+                130,
+                (
+                    FakePolygon(QRectF(10, 24, 20, 8)),
+                    FakePolygon(QRectF(33, 25, 5, 6)),
+                ),
+            )
+
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    real_document = view._document
+    fake_document = FakeDocument()
+    view._document = fake_document
+    monkeypatch.setattr(
+        view,
+        "_text_bounds",
+        lambda _page: (QRectF(10, 24, 40, 7),),
+    )
+    try:
+        selection = view._selection_for_drag(
+            (0, QPointF(12, 25)),
+            (0, QPointF(40, 28)),
+        )
+    finally:
+        view._document = real_document
+
+    assert fake_document.index_calls == [(0, 100, 30)]
+    assert selection is not None
+    assert selection.text == "stable formula text"
+    assert selection.bounds == ((10.0, 24.0, 28.0, 8.0),)
+
+
 def test_selectable_pdf_view_loads_real_pdf_in_continuous_mode(
     qtbot,
     tmp_path: Path,
@@ -421,6 +553,54 @@ def test_selected_sentence_has_a_visible_blue_overlay(qtbot, tmp_path: Path) -> 
             color.red() < 150 and color.blue() > 180
             for color in blue_pixels
         )
+    finally:
+        view.document().close()
+        view.close()
+
+
+def test_selection_uses_a_dedicated_overlay_and_paints_every_visual_line(
+    qtbot, tmp_path: Path
+) -> None:
+    pdf_view = _pdf_view_module()
+    document_path = tmp_path / "multi-line-selection.pdf"
+    _write_two_page_pdf(document_path)
+    view = pdf_view.SelectablePdfView()
+    qtbot.addWidget(view)
+    try:
+        view.resize(1000, 500)
+        view.show()
+        assert view.load_file(document_path) is True
+        qtbot.waitUntil(lambda: view.document().pageCount() == 2)
+        bounds = (
+            (72.0, 90.0, 160.0, 12.0),
+            (72.0, 112.0, 160.0, 12.0),
+            (72.0, 134.0, 160.0, 12.0),
+        )
+        view._selection = pdf_view.PdfTextSelection(
+            0, 0, 30, "three visual lines", bounds
+        )
+        view._refresh_overlay()
+        qtbot.wait(20)
+
+        assert view._overlay.parentWidget() is view.viewport()
+        assert view._overlay.geometry() == view.viewport().rect()
+        assert view._overlay.testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+
+        # A later PDF tile repaint must not erase the independent overlay.
+        view.viewport().update()
+        qtbot.wait(20)
+        image = view.viewport().grab().toImage()
+        layout = view._layout()
+        dpr = image.devicePixelRatio()
+        for bound in bounds:
+            point = layout.pdf_rect_to_viewport(0, bound, 0).center().toPoint()
+            color = image.pixelColor(
+                round(point.x() * dpr), round(point.y() * dpr)
+            )
+            assert color.red() < 170
+            assert color.blue() > 170
     finally:
         view.document().close()
         view.close()

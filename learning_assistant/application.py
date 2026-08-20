@@ -61,6 +61,12 @@ class ApplicationModeRouter:
         self.compact_window.show_front()
         return self.compact_window
 
+    def toggle_compact(self) -> MainWindow:
+        if self.compact_window is not None and self.compact_window.isVisible():
+            self.compact_window.hide()
+            return self.compact_window
+        return self.show_compact()
+
     def show_pdf(self) -> PdfReaderWindow:
         if self.pdf_window is None:
             self.pdf_window = self._pdf_factory()
@@ -231,7 +237,7 @@ class LearningAssistantApplication:
 
     def _hotkey(self, name: str) -> None:
         if name == "window":
-            self.mode_router.show_compact()
+            self.mode_router.toggle_compact()
         elif name == "selection":
             pdf_window = self.mode_router.pdf_window
             if (
