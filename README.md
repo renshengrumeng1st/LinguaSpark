@@ -159,6 +159,6 @@ test.bat
 build.bat
 ```
 
-构建结果位于 `dist\LinguaSpark.exe`。构建脚本会包含代码、图标、PDF.js 资源和已经生成的本地词典，但不会包含 `config.json`、API 密钥、历史或缓存。
+构建结果位于 `dist\LinguaSpark\LinguaSpark.exe`。快速启动版会保留同目录运行文件，避免每次启动重复解压 Qt 与 PDF 阅读组件；构建脚本会包含代码、图标、PDF.js 资源和已经生成的本地词典，但不会包含 `config.json`、API 密钥、历史或缓存。
 
 详细的模块边界和扩展方式请参阅 [架构说明](docs/ARCHITECTURE.md)。第三方组件及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -83,6 +83,7 @@ class LearningAssistantApplication:
         self.qt.setApplicationName("LinguaSpark")
         self.qt.setOrganizationName("LinguaSpark")
         self.qt.setQuitOnLastWindowClosed(False)
+        self.app_icon = self._install_application_icon()
         self.qt.setStyleSheet(APP_QSS)
 
         self.settings = SettingsStore()
@@ -159,14 +160,18 @@ class LearningAssistantApplication:
     def _open_settings(self) -> None:
         self._ensure_compact_window().open_settings()
 
-    def _create_tray(self) -> QSystemTrayIcon:
+    def _install_application_icon(self) -> QIcon:
         icon_path = project_root() / "assets" / "icon.ico"
         icon = (
             QIcon(str(icon_path))
             if icon_path.exists()
             else self.qt.style().standardIcon(QStyle.SP_ComputerIcon)
         )
-        tray = QSystemTrayIcon(icon, self.qt)
+        self.qt.setWindowIcon(icon)
+        return icon
+
+    def _create_tray(self) -> QSystemTrayIcon:
+        tray = QSystemTrayIcon(self.app_icon, self.qt)
         window = self._hotkey_label("window_hotkey", "Alt+Q")
         selection = self._hotkey_label("selection_hotkey", "Alt+W")
         tray.setToolTip(f"LinguaSpark · {window} 呼出 · {selection} 划词")

@@ -34,6 +34,32 @@ def test_importing_application_does_not_eagerly_load_qt_webengine() -> None:
     assert completed.stdout.strip() == "False"
 
 
+def test_application_installs_project_icon_for_top_level_windows(qtbot) -> None:
+    """Dropping the application-level icon must restore the blank Qt icon."""
+    qt = QApplication.instance()
+    assert qt is not None
+    previous_icon = qt.windowIcon()
+    application = LearningAssistantApplication.__new__(LearningAssistantApplication)
+    application.qt = qt
+
+    try:
+        icon = application._install_application_icon()
+        router = ApplicationModeRouter(FakeWindow, FakeWindow)
+        qtbot.addWidget(router.chooser)
+
+        assert not icon.isNull()
+        assert qt.windowIcon().cacheKey() == icon.cacheKey()
+        assert router.chooser.windowIcon().cacheKey() == icon.cacheKey()
+        assert {(size.width(), size.height()) for size in icon.availableSizes()} >= {
+            (16, 16),
+            (32, 32),
+            (48, 48),
+            (256, 256),
+        }
+    finally:
+        qt.setWindowIcon(previous_icon)
+
+
 class FakeWindow(QWidget):
     def __init__(self, active_selection: bool = False):
         super().__init__()
