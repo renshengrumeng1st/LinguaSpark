@@ -8,8 +8,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtTest import QSignalSpy
 
+from learning_assistant.core.paths import project_root
 from learning_assistant.domain.pdf_models import PdfAnnotation, PdfTextSelection
-from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter
+from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter, _READER_CSS
+
+
+def test_reader_theme_styles_live_in_the_bundled_asset_tree() -> None:
+    """A source-only stylesheet must not disappear from the packaged reader."""
+    bundled_assets = (project_root() / "assets").resolve()
+
+    assert _READER_CSS.resolve().is_relative_to(bundled_assets)
 
 
 def _write_three_line_pdf(path: Path) -> None:

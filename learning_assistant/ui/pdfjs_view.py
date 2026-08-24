@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 PDFJS_VERSION = "6.2.108"
 PDFJS_ASSET_ROOT = project_root() / "assets" / f"pdfjs-{PDFJS_VERSION}-legacy"
-_READER_CSS = Path(__file__).with_name("pdfjs_reader.css")
+_READER_CSS = project_root() / "assets" / "linguaspark" / "pdfjs_reader.css"
 
 _ANNOTATION_COLORS = {
     "yellow": "rgba(250, 204, 21, 0.42)",
