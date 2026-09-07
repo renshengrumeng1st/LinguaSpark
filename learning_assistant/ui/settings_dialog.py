@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from learning_assistant.core.settings import SettingsStore
 from learning_assistant.domain.models import ModelProfile
+from learning_assistant.services.autostart import AutostartError, AutostartService
 from learning_assistant.services.selection import GlobalHotkeyService
 
 
@@ -68,17 +69,24 @@ class HotkeyEdit(QLineEdit):
 class SettingsDialog(QDialog):
     settings_changed = Signal()
 
-    def __init__(self, settings: SettingsStore, parent=None):
+    def __init__(
+        self,
+        settings: SettingsStore,
+        parent=None,
+        autostart: AutostartService | None = None,
+    ):
         super().__init__(parent)
         self.settings = settings
+        self.autostart = autostart or AutostartService()
         self.setWindowTitle("设置")
         self.resize(570, 520)
         layout = QVBoxLayout(self)
-        tabs = QTabWidget()
-        tabs.addTab(self._models_tab(), "AI 模型")
-        tabs.addTab(self._learning_tab(), "学习与发音")
-        tabs.addTab(self._hotkeys_tab(), "快捷键")
-        layout.addWidget(tabs)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._general_tab(), "常规")
+        self.tabs.addTab(self._models_tab(), "AI 模型")
+        self.tabs.addTab(self._learning_tab(), "学习与发音")
+        self.tabs.addTab(self._hotkeys_tab(), "快捷键")
+        layout.addWidget(self.tabs)
         footer = QHBoxLayout()
         footer.addStretch(1)
         close_button = QPushButton("完成")
@@ -87,6 +95,52 @@ class SettingsDialog(QDialog):
         footer.addWidget(close_button)
         layout.addLayout(footer)
         self._refresh_models()
+
+    def _general_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        self.autostart_checkbox = QCheckBox("开机时自动启动 LinguaSpark")
+        try:
+            self.autostart_checkbox.setChecked(self.autostart.is_enabled())
+        except AutostartError as error:
+            self.autostart_checkbox.setEnabled(False)
+            initial_status = str(error)
+        else:
+            initial_status = "开机启动时将在后台驻留系统托盘，不弹出模式选择窗口。"
+        root.addWidget(self.autostart_checkbox)
+        hint = QLabel("使用当前 Windows 账户的启动设置，无需管理员权限。")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+        self.autostart_status = QLabel(initial_status)
+        self.autostart_status.setObjectName("muted")
+        self.autostart_status.setWordWrap(True)
+        root.addWidget(self.autostart_status)
+        actions = QHBoxLayout()
+        save = QPushButton("保存常规设置")
+        save.setObjectName("primary")
+        save.clicked.connect(self._save_general)
+        actions.addStretch(1)
+        actions.addWidget(save)
+        root.addLayout(actions)
+        root.addStretch(1)
+        return page
+
+    def _save_general(self) -> None:
+        requested = self.autostart_checkbox.isChecked()
+        try:
+            self.autostart.set_enabled(requested)
+            actual = self.autostart.is_enabled()
+        except AutostartError as error:
+            try:
+                self.autostart_checkbox.setChecked(self.autostart.is_enabled())
+            except AutostartError:
+                self.autostart_checkbox.setChecked(not requested)
+            self.autostart_status.setText("未能更新开机自启设置。")
+            QMessageBox.warning(self, "开机自启设置失败", str(error))
+            return
+        self.autostart_checkbox.setChecked(actual)
+        self.autostart_status.setText("开机自启已开启。" if actual else "开机自启已关闭。")
 
     def _models_tab(self) -> QWidget:
         page = QWidget()

@@ -203,3 +203,27 @@ def test_closing_mode_chooser_only_hides_it(qtbot):
     assert not router.chooser.isVisible()
     assert router.compact_window is None
     assert router.pdf_window is None
+
+
+def test_startup_argument_is_recognized() -> None:
+    assert LearningAssistantApplication._startup_requested(
+        ["LinguaSpark.exe", "--startup"]
+    )
+    assert not LearningAssistantApplication._startup_requested(["LinguaSpark.exe"])
+
+
+def test_startup_launch_stays_quiet_in_the_system_tray(qtbot) -> None:
+    router = ApplicationModeRouter(FakeWindow, FakeWindow)
+    qtbot.addWidget(router.chooser)
+    application = LearningAssistantApplication.__new__(LearningAssistantApplication)
+    application.hotkeys = SimpleNamespace(start=lambda: None)
+    application.review_timer = SimpleNamespace(start=lambda: None)
+    application.dictionary = SimpleNamespace(available=True)
+    application.mode_router = router
+    application.qt = SimpleNamespace(exec=lambda: 0)
+    application._startup_launch = True
+
+    assert application.run() == 0
+    assert not router.chooser.isVisible()
+    assert router.compact_window is None
+    assert router.pdf_window is None

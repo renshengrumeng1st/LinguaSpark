@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from learning_assistant.controller import LearningController
 from learning_assistant.core.settings import SettingsStore
 from learning_assistant.domain.models import AiStudyNote, DictionaryEntry, QueryKind, QueryRequest, SentenceResult
+from learning_assistant.services.autostart import AutostartService
 from learning_assistant.services.speech import SpeechProvider
 from learning_assistant.ui.result_views import SentenceResultView, WordResultView, text_label
 from learning_assistant.ui.settings_dialog import SettingsDialog
@@ -55,11 +56,13 @@ class MainWindow(QMainWindow):
         controller: LearningController,
         settings: SettingsStore,
         speech: SpeechProvider,
+        autostart: AutostartService | None = None,
     ):
         super().__init__()
         self.controller = controller
         self.settings = settings
         self.speech = speech
+        self.autostart = autostart or AutostartService()
         self.image_bytes: bytes | None = None
         self.current_kind: QueryKind | None = None
         self._last_auto_text = ""
@@ -392,7 +395,7 @@ class MainWindow(QMainWindow):
             self.settings.select_model(str(identifier))
 
     def open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self)
+        dialog = SettingsDialog(self.settings, self, autostart=self.autostart)
         dialog.settings_changed.connect(self._reload_models)
         self.settings_opened.emit()
         try:

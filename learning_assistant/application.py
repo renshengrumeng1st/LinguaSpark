@@ -14,6 +14,7 @@ from learning_assistant.controller import LearningController
 from learning_assistant.core.paths import project_root
 from learning_assistant.core.settings import SettingsStore
 from learning_assistant.pdf_controller import PdfTranslationController
+from learning_assistant.services.autostart import AutostartService
 from learning_assistant.services.dictionary import DictionaryRepository
 from learning_assistant.services.pdf_translation import QtPdfTranslationClient
 from learning_assistant.services.selection import GlobalHotkeyService, SelectionService
@@ -79,7 +80,9 @@ class ApplicationModeRouter:
 
 class LearningAssistantApplication:
     def __init__(self, argv: list[str] | None = None):
-        self.qt = QApplication(argv if argv is not None else sys.argv)
+        arguments = argv if argv is not None else sys.argv
+        self._startup_launch = self._startup_requested(arguments)
+        self.qt = QApplication(arguments)
         self.qt.setApplicationName("LinguaSpark")
         self.qt.setOrganizationName("LinguaSpark")
         self.qt.setQuitOnLastWindowClosed(False)
@@ -87,6 +90,7 @@ class LearningAssistantApplication:
         self.qt.setStyleSheet(APP_QSS)
 
         self.settings = SettingsStore()
+        self.autostart = AutostartService()
         self.dictionary = DictionaryRepository()
         self.dictionary.warmup()
         self.repository = LearningRepository()
@@ -126,7 +130,12 @@ class LearningAssistantApplication:
         self.hotkeys.registration_failed.connect(self._hotkey_registration_failed)
 
     def _create_compact_window(self) -> MainWindow:
-        window = MainWindow(self.controller, self.settings, self.speech)
+        window = MainWindow(
+            self.controller,
+            self.settings,
+            self.speech,
+            self.autostart,
+        )
         self.main_window = window
         window.review_count_changed.connect(self._refresh_review_action)
         window.settings_opened.connect(self.hotkeys.stop)
@@ -297,8 +306,13 @@ class LearningAssistantApplication:
         self.review_timer.start()
         if not self.dictionary.available:
             logger.warning("Local dictionary database is missing")
-        self.mode_router.show_chooser()
+        if not self._startup_launch:
+            self.mode_router.show_chooser()
         return self.qt.exec()
+
+    @staticmethod
+    def _startup_requested(arguments: list[str]) -> bool:
+        return "--startup" in arguments
 
     def quit(self) -> None:
         self.hotkeys.stop()
