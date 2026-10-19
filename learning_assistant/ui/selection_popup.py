@@ -83,6 +83,7 @@ class SelectionPopup(QWidget):
         controller.query_started.connect(self._started)
         controller.word_ready.connect(self._word)
         controller.ai_note_ready.connect(self._note)
+        controller.ai_partial.connect(self._partial)
         controller.sentence_ready.connect(self._sentence)
         controller.query_failed.connect(self._error)
 
@@ -134,6 +135,14 @@ class SelectionPopup(QWidget):
             return
         useful = note.sense_in_context or note.plain_explanation or note.memory_tip
         self.ai_note.setText(useful)
+        self.adjustSize()
+        self._fit_to_screen()
+
+    def _partial(self, translation: str) -> None:
+        if (not self.isVisible() or not self._accepting_result
+                or self.current_kind not in (QueryKind.SENTENCE, QueryKind.IMAGE)):
+            return
+        self.content.setText(translation)
         self.adjustSize()
         self._fit_to_screen()
 

@@ -16,7 +16,9 @@ from learning_assistant.domain.models import (
     QueryRequest,
     SentenceResult,
 )
-from learning_assistant.services.ai_client import PROMPT_VERSION, QtAIClient
+from learning_assistant.services.ai_client import (
+    PROMPT_VERSION, QtAIClient, StreamingTranslationExtractor,
+)
 from learning_assistant.services.dictionary import DictionaryRepository
 from learning_assistant.storage.learning_repository import LearningRepository
 
@@ -54,6 +56,7 @@ class LearningController(QObject):
         self._active_cache_key = ""
         self._active_model_id = ""
         self._current_payload: dict[str, Any] = {}
+        self._translation_stream = StreamingTranslationExtractor()
 
     @staticmethod
     def classify(text: str, has_image: bool = False) -> QueryKind:
@@ -85,6 +88,7 @@ class LearningController(QObject):
         self._active_entry = None
         self._active_model_id = ""
         self._current_payload = {}
+        self._translation_stream = StreamingTranslationExtractor()
         self.query_started.emit(request)
 
         if kind == QueryKind.WORD:
@@ -129,8 +133,12 @@ class LearningController(QObject):
         self._active_request_id = self.ai.start(profile, request, self._active_entry)
 
     def _on_partial(self, request_id: int, text: str) -> None:
-        if request_id == self._active_request_id:
-            self.ai_partial.emit(text)
+        if (request_id != self._active_request_id or not self._active
+                or self._active.kind not in (QueryKind.SENTENCE, QueryKind.IMAGE)):
+            return
+        translation = self._translation_stream.feed(text)
+        if translation is not None:
+            self.ai_partial.emit(translation)
 
     def _on_ai_complete(
         self, request_id: int, structured: dict[str, Any], timings: dict[str, Any]

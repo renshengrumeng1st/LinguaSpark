@@ -2,7 +2,16 @@
 
 LinguaSpark 是一款面向 Windows 的 AI 辅助英语学习助手。它既可以快速查询单词、翻译句子和图片，也可以在 PDF 文献中划选句子并即时获得译文与词组分析。
 
-当前版本：`v2.1`
+当前版本：`v2.2`
+
+[下载 Windows 64 位发布包](https://github.com/renshengrumeng1st/LinguaSpark/releases/download/v2.2/LinguaSpark-v2.2-windows-x64.zip) · [版本发布记录](https://github.com/renshengrumeng1st/LinguaSpark/releases)
+
+## v2.2 更新
+
+- 新增 Windows 开机自启设置，登录后在系统托盘后台运行。
+- 便捷模式的句子、图片和全局划词翻译支持流式显示译文，无需等待词组和学习提示全部生成。
+- 译文生成期间暂不允许收藏，完成后再保存完整结果，修复流式期间收藏内容为空的问题。
+- 修复流式译文中反斜杠、Unicode 转义和分块边界的处理。
 
 ## 主要功能
 
@@ -10,11 +19,12 @@ LinguaSpark 是一款面向 Windows 的 AI 辅助英语学习助手。它既可�
 
 - **单词查询**：输入单词后自动查询本地词典，优先显示音标、词性、释义和词形，不必等待网络。
 - **AI 助记**：随后由 AI 补充通俗解释、近义词、常用搭配、例句和记忆提示。
-- **句子翻译**：输入句子后按 `Ctrl+Enter`，获得 AI 翻译结果。
-- **图片翻译**：直接粘贴剪贴板图片，再按 `Ctrl+Enter` 识别并翻译。
+- **句子翻译**：输入句子后按 `Ctrl+Enter`，流式显示 AI 译文，再补充关键表达和学习提示。
+- **图片翻译**：直接粘贴剪贴板图片，再按 `Ctrl+Enter` 识别并流式显示译文。
 - **全局划词翻译**：在其他应用中选中文字后按 `Alt+W`，LinguaSpark 会优先通过 Windows UI Automation 读取选区，并在失败时安全回退到剪贴板。
 - **发音**：支持离线 Windows 本地语音，也可配置音质更自然的 Azure Neural TTS。
 - **学习与复习**：可以收藏内容、将单词加入学习计划，并使用“不记得 / 模糊 / 记得”完成间隔复习。
+- **开机自启**：可在常规设置中开启，登录 Windows 后自动驻留托盘。
 
 ### PDF 阅读模式
 
@@ -31,11 +41,22 @@ LinguaSpark 是一款面向 Windows 的 AI 辅助英语学习助手。它既可�
 
 ### 环境要求
 
-- Windows 10 或 Windows 11
-- 已安装 Python，建议使用 Python 3.11 或更高版本
+- Windows 10 或 Windows 11（64 位）
 - 一个兼容 OpenAI API 格式的 AI 模型服务
 
+### 使用 Windows 发布包
+
+1. 下载上方的 `LinguaSpark-v2.2-windows-x64.zip`。
+2. 将压缩包完整解压到固定目录。
+3. 双击 `LinguaSpark.exe` 启动，无需安装 Python。
+
+请保留 EXE 同目录下的 `_internal` 文件夹，不要单独移动 EXE。发布包内已包含本地词典与 PDF 阅读组件。
+
+升级时退出托盘中的旧程序，再使用新解压的完整目录。用户配置和学习数据保存在 AppData；如果更换了安装路径，请在新版本的常规设置中重新开启开机自启。
+
 ### 从源码运行
+
+源码运行需要 Python，建议使用 Python 3.11 或更高版本。
 
 克隆项目：
 
@@ -58,6 +79,10 @@ run.bat
 
 启动时可以选择“便捷模式”或“PDF 阅读模式”。程序关闭窗口后仍会驻留在系统托盘，可通过托盘菜单重新打开模式选择、便捷模式、PDF 阅读模式或设置。
 
+### 开机自动启动
+
+打开“设置 → 常规”，勾选“开机时自动启动 LinguaSpark”，点击“保存常规设置”。此设置仅作用于当前 Windows 用户；自动启动时不弹出模式选择窗口，可通过系统托盘或快捷键打开界面。取消勾选并保存即可关闭。
+
 ## 首次配置 AI 模型
 
 1. 打开“设置 → AI 模型”。
@@ -76,6 +101,8 @@ AI 模型负责句子、图片和 PDF 选区翻译，也负责为单词生成助
 ### 翻译句子
 
 输入完整句子，按 `Ctrl+Enter` 或点击“开始学习”。
+
+译文会随着模型生成逐步显示。等待本次翻译完成后，可点击“收藏”保存包含关键表达和学习提示的完整结果。
 
 ### 翻译图片
 
@@ -151,6 +178,13 @@ install_dictionary.bat C:\path\to\ecdict.csv
 
 ```bat
 test.bat
+```
+
+`test.bat` 使用 Qt 离屏后端。若 PDF.js 测试遇到显卡上下文丢失或 WebEngine 进程退出，可在有图形桌面的 Windows PowerShell 中使用正常窗口后端验证：
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 构建 Windows 可执行文件：

@@ -85,6 +85,54 @@ def parse_json_content(text: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+class StreamingTranslationExtractor:
+    """Expose only the decoded translation field while JSON is still arriving."""
+
+    def __init__(self):
+        self._content = ""
+        self._last_translation = ""
+
+    def feed(self, chunk: str) -> str | None:
+        self._content += chunk
+        match = re.search(r'"translation"\s*:\s*"', self._content)
+        if not match:
+            return None
+
+        raw_value = self._content[match.end():]
+        end = 0
+        escaped = False
+        for character in raw_value:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                break
+            end += 1
+        fragment = raw_value[:end]
+        if escaped:
+            fragment = fragment[:-1]
+        incomplete_unicode = re.search(
+            r"(?<!\\)(?:\\\\)*(\\u[0-9a-fA-F]{0,3})$", fragment,
+        )
+        if incomplete_unicode:
+            fragment = fragment[:incomplete_unicode.start(1)]
+        # A split surrogate pair is not displayable until its low half arrives.
+        incomplete_surrogate = re.search(
+            r"(?<!\\)(?:\\\\)*(\\u[dD][89aAbB][0-9a-fA-F]{2})$", fragment,
+        )
+        if incomplete_surrogate:
+            fragment = fragment[:incomplete_surrogate.start(1)]
+        try:
+            translation = json.loads('"' + fragment + '"')
+        except json.JSONDecodeError:
+            return None
+        if translation and translation != self._last_translation:
+            self._last_translation = translation
+            return translation
+        return None
+
+
 @dataclass(slots=True)
 class RequestContext:
     request_id: int

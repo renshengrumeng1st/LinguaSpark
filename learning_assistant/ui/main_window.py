@@ -192,6 +192,7 @@ class MainWindow(QMainWindow):
         self.controller.query_started.connect(self._on_started)
         self.controller.word_ready.connect(self._on_word)
         self.controller.ai_note_ready.connect(self._on_note)
+        self.controller.ai_partial.connect(self._on_partial)
         self.controller.sentence_ready.connect(self._on_sentence)
         self.controller.query_failed.connect(self._on_error)
         self.controller.query_finished.connect(self._on_finished)
@@ -246,6 +247,8 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.word_view)
         else:
             self.sentence_view.set_source(request.text)
+            self.sentence_view.set_favorite(self.controller.is_current_favorite())
+            self.sentence_view.favorite_button.setEnabled(False)
             self.sentence_view.translation.setText("AI 正在翻译…")
             self.sentence_view.phrases.hide()
             self.sentence_view.tip.hide()
@@ -265,9 +268,19 @@ class MainWindow(QMainWindow):
         self.scroll.show()
         self._resize_to(720)
 
+    def _on_partial(self, translation: str) -> None:
+        if self.current_kind not in (QueryKind.SENTENCE, QueryKind.IMAGE):
+            return
+        self.sentence_view.translation.setText(translation)
+        self.status.setText("正在生成译文…")
+        if not self.scroll.isVisible():
+            self.scroll.show()
+            self._resize_to(430)
+
     def _on_sentence(self, result: SentenceResult, cache_hit: bool) -> None:
         self.sentence_view.show_result(result)
         self.sentence_view.set_favorite(self.controller.is_current_favorite())
+        self.sentence_view.favorite_button.setEnabled(True)
         self.status.setText("翻译结果 · 缓存" if cache_hit else "翻译已完成")
         self.scroll.show()
         self._resize_to(530)
