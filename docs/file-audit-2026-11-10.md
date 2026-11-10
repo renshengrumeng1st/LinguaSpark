@@ -2,7 +2,7 @@
 
 当前入口 `main.py` 只使用 `learning_assistant.application`；构建入口为 `tools/build_release.py`，当前测试位于 `tests_v2/`。
 
-## 无当前引用的历史实现
+## 已删除的无当前引用历史文件
 
 | 路径 | 核查结果 |
 | --- | --- |
@@ -13,7 +13,7 @@
 | `summary.md` | 历史工作记录，包含已过时的界面与发布说明；当前使用文档以 README 为准 |
 | `artifacts/ui-compact.png`、`ui-preview.png`、`ui-word-expanded.png` | 早期截图，无当前文档引用 |
 
-以上文件本次仅列为清理候选，保留原位，不影响当前构建；可在明确清理范围后另行删除。Git 历史也保留了这些旧实现。
+用户明确授权删除后，已移除以上 27 个 Git 跟踪文件，以及旧 `ui/`、`utils/` 目录内的编译缓存。删除前核对了未提交改动、当前代码引用及目录边界；这些旧实现仍可从 Git 历史恢复。
 
 ## 保留且仍有用途的内容
 

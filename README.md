@@ -242,6 +242,6 @@ build.bat
 - `tests_v2/`：当前回归测试；`tools/`：词典生成、迁移、构建和诊断工具。
 - `assets/`：PDF.js、图标和主题资源；`data/`：离线词典。
 - `artifacts/`、`build/`、`dist/`：本地诊断、构建及发布产物，不纳入新提交。
-- 根目录的 `ui/`、`utils/`、`config.py`、`translator.py` 和旧 `learning_assistant/ui/pdf_view.py` 属于历史实现，当前入口和发布构建不引用。详细核查见 [文件用途审计](docs/file-audit-2026-11-10.md)。
+- 已移除不再使用的旧 Tk 界面、辅助模块和旧 Qt PDF 视图，详细范围与保留项见 [文件用途审计](docs/file-audit-2026-11-10.md)。
 
 详细的模块边界和扩展方式请参阅 [架构说明](docs/ARCHITECTURE.md)。第三方组件及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
