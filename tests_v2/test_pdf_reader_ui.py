@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtPdfWidgets import QPdfView
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from learning_assistant.core.settings import SecretStore, SettingsStore
 from learning_assistant.domain.pdf_models import (
@@ -26,6 +26,8 @@ class FakePdfController(QObject):
     translation_completed = Signal(object, bool)
     translation_failed = Signal(str)
     annotations_changed = Signal(object)
+    learning_changed = Signal()
+    learning_failed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -39,6 +41,10 @@ class FakePdfController(QObject):
     def set_selection(self, selection, document_key: str) -> None:
         self.selection = selection
         self.document_key = document_key
+        self.selection_changed.emit(selection)
+
+    def is_phrase_in_learning(self, phrase):
+        return False
 
     def translate_selection(self) -> None:
         self.translate_calls += 1
@@ -134,7 +140,7 @@ def test_translation_partial_is_visible_before_phrase_analysis(
 
     controller.phrase_ready.emit(PdfPhrase("selected sentence", "选中的句子"))
     assert not tab.phrase_panel.isHidden()
-    assert "selected sentence" in tab.phrase_text.toPlainText()
+    assert "selected sentence" in [label.text() for label in tab.phrase_list.findChildren(QLabel)]
 
 
 def test_cached_completion_populates_translation_and_phrases(
@@ -150,7 +156,7 @@ def test_cached_completion_populates_translation_and_phrases(
     controller.translation_completed.emit(result, True)
 
     assert tab.translation.toPlainText() == "缓存译文"
-    assert "in context" in tab.phrase_text.toPlainText()
+    assert "in context" in [label.text() for label in tab.phrase_list.findChildren(QLabel)]
     assert "缓存" in tab.status.text()
 
 
@@ -248,7 +254,7 @@ def test_cross_page_selection_stays_translatable_but_disables_marking(
     tab.pdf_view.selection_changed.emit(selection)
 
     assert tab.translate_button.isEnabled()
-    assert not tab.highlight_combo.isEnabled()
+    assert tab.highlight_combo.isEnabled()
     assert not tab.highlight_button.isEnabled()
     assert not tab.remove_highlight_button.isEnabled()
     assert "可翻译" in tab.status.text()

@@ -39,6 +39,7 @@ class ModelProfile:
     model: str
     api_key: str = field(default="", repr=False)
     enabled: bool = True
+    max_output_tokens: int = 4096
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)

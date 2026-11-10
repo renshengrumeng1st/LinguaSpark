@@ -18,6 +18,7 @@ import threading
 from typing import Any
 
 from learning_assistant.core.paths import app_data_dir, project_root
+from learning_assistant.core.appearance import THEME_IDS
 from learning_assistant.domain.models import LanguageProfile, ModelProfile
 
 
@@ -27,10 +28,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "models": [],
     "languages": {"source": "en", "target": "zh-CN", "explanation": "zh-CN"},
     "auto_lookup_delay_ms": 160,
+    "auto_ai_enabled": True,
+    "auto_ai_delay_ms": 800,
     "selection_hotkey": "alt+w",
     "window_hotkey": "alt+q",
+    "pdf_highlight_hotkey": "ctrl+h",
+    "pdf_remove_highlight_hotkey": "ctrl+r",
     "review_reminders": True,
     "last_review_notice_date": "",
+    "appearance": {"theme": "sakura"},
     "pdf": {
         "theme": "eye_care",
         "last_directory": "",
@@ -191,6 +197,11 @@ class SettingsStore:
     def _normalize(self) -> None:
         if not isinstance(self._data.get("models"), list):
             self._data["models"] = []
+        appearance = self._data.get("appearance")
+        theme = appearance.get("theme") if isinstance(appearance, dict) else None
+        self._data["appearance"] = {
+            "theme": theme if theme in THEME_IDS else "sakura",
+        }
         languages = self._data.get("languages")
         if not isinstance(languages, dict):
             self._data["languages"] = dict(DEFAULT_SETTINGS["languages"])
@@ -284,8 +295,16 @@ class SettingsStore:
                 model=str(item.get("model", "")),
                 api_key=self.secrets.get(f"model:{identifier}:api_key"),
                 enabled=bool(item.get("enabled", True)),
+                max_output_tokens=self._output_tokens(item.get("max_output_tokens", 4096)),
             ))
         return result
+
+    @staticmethod
+    def _output_tokens(value: Any) -> int:
+        try:
+            return max(256, min(131072, int(value)))
+        except (ValueError, TypeError, OverflowError):
+            return 4096
 
     def active_model(self) -> ModelProfile | None:
         active = str(self._data.get("active_model_id", ""))
@@ -299,6 +318,7 @@ class SettingsStore:
             "base_url": profile.base_url.rstrip("/"),
             "model": profile.model,
             "enabled": profile.enabled,
+            "max_output_tokens": self._output_tokens(profile.max_output_tokens),
         }
         models = self._data.setdefault("models", [])
         for index, item in enumerate(models):

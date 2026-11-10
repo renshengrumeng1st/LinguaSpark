@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QObject, Signal
 
 from learning_assistant.core.settings import SecretStore, SettingsStore
@@ -16,6 +17,7 @@ from learning_assistant.domain.pdf_models import (
     PdfTranslationResult,
 )
 from learning_assistant.storage.learning_repository import LearningRepository
+from tests_v2.test_model_connection import model_server  # noqa: F401 - shared local HTTP fixture
 
 
 class SandboxSecretStore(SecretStore):
@@ -104,9 +106,38 @@ def test_pdf_request_payload_prioritizes_translation_and_sends_only_selection() 
     assert system.index("translation") < system.index("<<<PHRASES>>>")
     assert "at most 5" in system
     assert payload["temperature"] == 0.1
-    assert payload["max_tokens"] == 768
+    assert payload["max_tokens"] == 4096
     assert payload["thinking"] == {"type": "disabled"}
     assert payload["stream"] is True
+
+
+def test_deepseek_pdf_translation_disables_thinking_without_json_mode() -> None:
+    pdf_translation, _ = _pdf_modules()
+    payload = pdf_translation.QtPdfTranslationClient.build_payload(
+        ModelProfile("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-flash", "test-key"),
+        "A small discovery.", LanguageProfile(),
+    )
+    assert payload.get("thinking") == {"type": "disabled"}
+    assert "response_format" not in payload
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_truncated_pdf_response_does_not_complete(qtbot, qapp, model_server, streaming):
+    pdf_translation, _ = _pdf_modules()
+    text = "一段尚未完成的译文"
+    if streaming:
+        model_server.content_type = "text/event-stream"
+        frame = {"choices": [{"delta": {"content": text}, "finish_reason": "length"}]}
+        model_server.response_body = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode()
+    else:
+        model_server.payload = {"choices": [{"message": {"content": text}, "finish_reason": "length"}]}
+    client = pdf_translation.QtPdfTranslationClient(qapp)
+    completed = []
+    client.completed.connect(lambda *args: completed.append(args))
+    with qtbot.waitSignal(client.failed, timeout=2500) as signal:
+        client.start(ModelProfile("test", "Test", model_server.url, "test-model", "test-key"), "An unfinished sentence.", LanguageProfile())
+    assert "截断" in signal.args[1]
+    assert not completed
 
 
 def test_pdf_controller_ignores_late_result_from_cancelled_selection(

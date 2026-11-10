@@ -17,6 +17,8 @@ class FakePdfController(QObject):
     translation_completed = Signal(object, bool)
     translation_failed = Signal(str)
     annotations_changed = Signal(object)
+    learning_changed = Signal()
+    learning_failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -25,6 +27,10 @@ class FakePdfController(QObject):
 
     def set_selection(self, selection, _document_key: str) -> None:
         self.selection = selection
+        self.selection_changed.emit(selection)
+
+    def is_phrase_in_learning(self, phrase):
+        return False
 
     def translate_selection(self) -> None:
         pass
@@ -162,6 +168,11 @@ def test_pdf_window_maximizes_and_focus_mode_preserves_active_tab(
     tab = window.current_tab()
     tab.translation.setPlainText("preserved translation")
     tab.pdf_view.set_zoom_factor(1.3)
+    # Adding the initial content can update native window constraints. Establish
+    # the state to restore immediately before entering fullscreen.
+    window.showMaximized()
+    qtbot.waitUntil(lambda: window.isMaximized()
+                   and window.width() >= window.screen().availableGeometry().width())
 
     window.focus_button.click()
     qtbot.wait(10)
@@ -177,7 +188,10 @@ def test_pdf_window_maximizes_and_focus_mode_preserves_active_tab(
     qtbot.keyClick(tab.pdf_view, Qt.Key.Key_Escape)
     qtbot.wait(10)
 
-    assert window.isMaximized()
+    assert window.isMaximized(), (
+        window.windowState(), window._pre_focus_state, window._focus_mode,
+        window.isActiveWindow(), window.isFullScreen(),
+    )
     assert not window.toolbar_widget.isHidden()
     assert not window.tab_widget.tabBar().isHidden()
     assert window.current_tab() is tab

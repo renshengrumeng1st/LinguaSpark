@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
 from learning_assistant.domain.models import AiStudyNote, DictionaryEntry, SentenceResult
@@ -43,8 +43,9 @@ class WordResultView(QFrame):
     copy_requested = Signal(str)
     favorite_requested = Signal()
     study_requested = Signal()
+    details_expanded_changed = Signal(bool)
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, *, details_expanded: bool = False):
         super().__init__(parent)
         self.setObjectName("card")
         self.entry: DictionaryEntry | None = None
@@ -75,16 +76,18 @@ class WordResultView(QFrame):
         self.study_button.setObjectName("primary")
         self.study_button.clicked.connect(self.study_requested)
         header.addWidget(self.speak_button, 0, Qt.AlignTop)
-        header.addWidget(self.copy_button, 0, Qt.AlignTop)
-        header.addWidget(self.favorite_button, 0, Qt.AlignTop)
-        header.addWidget(self.study_button, 0, Qt.AlignTop)
         layout.addLayout(header)
-
+        actions = QHBoxLayout()
+        actions.addWidget(self.copy_button)
+        actions.addWidget(self.favorite_button)
+        actions.addStretch(1)
+        actions.addWidget(self.study_button)
         self.pos = text_label("", "muted")
         self.pos.hide()
         self.meanings = text_label()
         layout.addWidget(self.pos)
         layout.addWidget(self.meanings)
+        layout.addLayout(actions)
 
         self.ai_state = text_label("AI 助学内容生成中…", "muted", selectable=False)
         layout.addWidget(self.ai_state)
@@ -96,17 +99,37 @@ class WordResultView(QFrame):
         self.mistake = Section("易错提醒")
         self.memory = Section("记忆提示")
         self.examples = Section("例句")
-        for section in (
-            self.plain, self.context, self.synonyms, self.collocations,
-            self.mistake, self.memory, self.examples,
-        ):
+        for section in (self.plain, self.context, self.collocations, self.examples):
             layout.addWidget(section)
         self.example_speak_button = QPushButton("朗读例句")
         self.example_speak_button.setObjectName("secondary")
         self.example_speak_button.clicked.connect(self._speak_examples)
         self.example_speak_button.hide()
         layout.addWidget(self.example_speak_button, 0, Qt.AlignLeft)
+        self.more_button = QToolButton()
+        self.more_button.setText("更多学习内容")
+        self.more_button.setCheckable(True)
+        self.more_button.setChecked(details_expanded)
+        self.more_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.more_button.setArrowType(Qt.DownArrow if details_expanded else Qt.RightArrow)
+        self.more_button.setAccessibleName("更多学习内容")
+        self.more_button.toggled.connect(self._toggle_details)
+        self.more_button.hide()
+        layout.addWidget(self.more_button, 0, Qt.AlignLeft)
+        self.more_content = QWidget()
+        more_layout = QVBoxLayout(self.more_content)
+        more_layout.setContentsMargins(0, 0, 0, 0)
+        more_layout.setSpacing(6)
+        for section in (self.synonyms, self.mistake, self.memory):
+            more_layout.addWidget(section)
+        self.more_content.hide()
+        layout.addWidget(self.more_content)
         layout.addStretch(1)
+
+    def _toggle_details(self, expanded: bool) -> None:
+        self.more_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.more_content.setVisible(expanded and not self.more_button.isHidden())
+        self.details_expanded_changed.emit(expanded)
 
     def show_query(self, word: str) -> None:
         self.entry = None
@@ -115,13 +138,16 @@ class WordResultView(QFrame):
         self.phonetic.clear()
         self.pos.hide()
         self.meanings.setText("本地词典未找到，正在请 AI 辅助解释…")
+        self.ai_state.setText("AI 助学内容生成中…")
         self.ai_state.show()
         self.example_speak_button.hide()
+        self.more_button.hide()
+        self.more_content.hide()
         for section in (
             self.plain, self.context, self.synonyms, self.collocations,
             self.mistake, self.memory, self.examples,
         ):
-            section.hide()
+            section.set_value("")
 
     def show_entry(self, entry: DictionaryEntry) -> None:
         self.entry = entry
@@ -151,6 +177,9 @@ class WordResultView(QFrame):
             examples.append(f"{index}. {sentence}" + (f"\n   {translation}" if translation else ""))
         self.examples.set_value("\n\n".join(examples))
         self.example_speak_button.setVisible(bool(examples))
+        has_details = bool(note.synonyms or note.common_mistake.strip() or note.memory_tip.strip())
+        self.more_button.setVisible(has_details)
+        self.more_content.setVisible(has_details and self.more_button.isChecked())
 
     def _speak_examples(self) -> None:
         sentences = [
@@ -184,7 +213,7 @@ class WordResultView(QFrame):
             self.plain, self.context, self.synonyms, self.collocations,
             self.mistake, self.memory, self.examples,
         ):
-            if section.isVisible() and section.value.text():
+            if section.value.text():
                 lines.extend([section.title.text(), section.value.text()])
         return "\n".join(lines)
 

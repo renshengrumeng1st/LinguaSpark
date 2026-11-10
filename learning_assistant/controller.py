@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, fields
+import hashlib
 import time
 from typing import Any
 
@@ -67,10 +68,14 @@ class LearningController(QObject):
         return QueryKind.SENTENCE
 
     def cancel(self) -> None:
-        if self._active_request_id is not None:
-            self.ai.cancel(self._active_request_id)
+        request_id, self._active_request_id = self._active_request_id, None
+        if request_id is not None:
+            self.ai.cancel(request_id)
+            self.query_finished.emit({"cancelled": True})
 
-    def submit(self, text: str, context: str = "", image_bytes: bytes | None = None) -> None:
+    def submit(self, text: str, context: str = "", image_bytes: bytes | None = None,
+               *, use_ai: bool = True, force_refresh: bool = False,
+               save_local_history: bool = True) -> None:
         text = text.strip()
         if not text and not image_bytes:
             self.query_failed.emit("请输入单词、句子或粘贴图片")
@@ -100,6 +105,14 @@ class LearningController(QObject):
                 self._current_payload["dictionary"] = asdict(entry)
                 self.word_ready.emit(entry, local_ms)
 
+        if self._active_entry and save_local_history:
+            self.repository.add_history(text, kind.value, self._current_payload,
+                                        request.languages.source, request.languages.target)
+
+        if not use_ai:
+            self.query_finished.emit({"local_only": True})
+            return
+
         profile = self.settings.active_model()
         if not profile or not profile.api_key:
             self._active_request_id = None
@@ -112,7 +125,7 @@ class LearningController(QObject):
         self._active_model_id = profile.id
 
         dictionary_facts = self._active_entry.to_prompt_dict() if self._active_entry else {}
-        self._active_cache_key = self.repository.stable_key(
+        cache_parts = (
             PROMPT_VERSION,
             profile.id,
             profile.base_url,
@@ -125,12 +138,47 @@ class LearningController(QObject):
             request.languages.explanation,
             dictionary_facts,
         )
-        cached = self.repository.get_ai_cache(self._active_cache_key)
+        if request.image_bytes:
+            cache_parts += (hashlib.sha256(request.image_bytes).hexdigest(),)
+        self._active_cache_key = self.repository.stable_key(*cache_parts)
+        cached = None if force_refresh else self.repository.get_ai_cache(self._active_cache_key)
         if cached:
             self._active_request_id = None
             self._apply_structured_result(cached, cache_hit=True)
             return
         self._active_request_id = self.ai.start(profile, request, self._active_entry)
+
+    def retry(self) -> None:
+        request = self._active
+        if request is None:
+            return
+        if request.kind == QueryKind.IMAGE and not request.image_bytes:
+            self.query_failed.emit("历史记录不保存原图片，请重新粘贴图片后翻译。")
+            return
+        self.submit(request.text, request.context, request.image_bytes, force_refresh=True)
+
+    def restore_saved(self, item: dict[str, Any]) -> None:
+        """Display persisted facts without contacting a provider or rewriting history."""
+        self.cancel()
+        kind = QueryKind(item["query_kind"])
+        self._active = QueryRequest(item["source_text"], kind, self.settings.languages(),
+                                    context=item.get("context", ""))
+        self._active_model_id = ""
+        self._active_entry = None
+        self._current_payload = json_payload = dict(item["payload"])
+        self.query_started.emit(self._active)
+        dictionary = json_payload.get("dictionary")
+        if kind == QueryKind.WORD:
+            self._active_entry = None
+            if isinstance(dictionary, dict) and dictionary.get("word"):
+                allowed = {field.name for field in fields(DictionaryEntry)}
+                self._active_entry = DictionaryEntry(**{k: v for k, v in dictionary.items() if k in allowed})
+                self.word_ready.emit(self._active_entry, 0)
+            if isinstance(json_payload.get("ai_note"), dict):
+                self.ai_note_ready.emit(AiStudyNote.from_dict(json_payload["ai_note"]), True)
+        elif isinstance(json_payload.get("sentence"), dict):
+            self.sentence_ready.emit(SentenceResult.from_dict(json_payload["sentence"]), True)
+        self.query_finished.emit({"saved": True})
 
     def _on_partial(self, request_id: int, text: str) -> None:
         if (request_id != self._active_request_id or not self._active

@@ -40,6 +40,8 @@ class PdfReaderWindow(QMainWindow):
 
     compact_mode_requested = Signal()
     settings_requested = Signal()
+    review_requested = Signal()
+    learning_changed = Signal()
 
     def __init__(
         self,
@@ -52,6 +54,7 @@ class PdfReaderWindow(QMainWindow):
         self._controller_factory = controller_factory
         self._tabs_by_path: dict[str, PdfReaderTab] = {}
         self._focus_mode = False
+        self._pre_focus_state = Qt.WindowState.WindowNoState
         self.setWindowTitle("LinguaSpark · PDF 阅读模式")
         self.resize(1200, 760)
         self.setMinimumSize(900, 600)
@@ -86,6 +89,10 @@ class PdfReaderWindow(QMainWindow):
         self.compact_button = QPushButton("便捷模式")
         self.compact_button.setObjectName("secondary")
         toolbar.addWidget(self.compact_button)
+        self.review_button = QPushButton("复习")
+        self.review_button.setToolTip("复习从查词与 PDF 中积累的表达")
+        self.review_button.clicked.connect(self.review_requested)
+        toolbar.addWidget(self.review_button)
         self.focus_button = QPushButton("专注阅读")
         self.focus_button.setObjectName("secondary")
         toolbar.addWidget(self.focus_button)
@@ -185,6 +192,7 @@ class PdfReaderWindow(QMainWindow):
             return True
 
         controller = self._controller_factory()
+        controller.learning_changed.connect(self.learning_changed)
         tab = PdfReaderTab(controller, self.settings)
         tab.set_theme(str(self.theme_combo.currentData() or "eye_care"))
         if not tab.load_file(resolved):
@@ -209,9 +217,37 @@ class PdfReaderWindow(QMainWindow):
         self._sync_empty_state()
         return True
 
+    def open_source(self, source: dict) -> bool:
+        """Return to a saved local source without duplicating an open tab."""
+        try:
+            if not isinstance(source, dict) or not isinstance(source.get("path"), str) or not source["path"]:
+                raise ValueError
+            page_index = source.get("page_index")
+            if not isinstance(page_index, int) or isinstance(page_index, bool) or page_index < 0:
+                raise ValueError
+            path = Path(source["path"])
+            if not path.is_absolute() or not path.is_file() or path.suffix.casefold() != ".pdf":
+                raise ValueError
+            if self.open_file(path):
+                tab = self.current_tab()
+                if tab is not None:
+                    return tab.pdf_view.go_to_page(page_index)
+        except (OSError, ValueError):
+            pass
+        message = "无法返回来源 PDF，请检查文件是否已移动或删除。"
+        self.global_status.setText(message)
+        self.statusBar().showMessage(message, 8000)
+        return False
+
     def current_tab(self) -> PdfReaderTab | None:
         widget = self.tab_widget.currentWidget()
         return widget if isinstance(widget, PdfReaderTab) else None
+
+    def reload_shortcuts(self) -> None:
+        for index in range(self.tab_widget.count()):
+            tab = self.tab_widget.widget(index)
+            if isinstance(tab, PdfReaderTab):
+                tab.reload_shortcuts()
 
     def close_tab(self, index: int) -> None:
         widget = self.tab_widget.widget(index)
@@ -283,13 +319,6 @@ class PdfReaderWindow(QMainWindow):
             tab = self.tab_widget.widget(index)
             if isinstance(tab, PdfReaderTab):
                 tab.set_theme(theme)
-        self.centralWidget().setStyleSheet(
-            """
-            QLabel#pdfTitle { font-size: 20px; font-weight: 700; }
-            QLabel#emptyTitle { font-size: 22px; font-weight: 650; color: #374151; }
-            QLabel#pdfStatus { color: #6b7280; }
-            """
-        )
 
     def has_active_selection(self) -> bool:
         tab = self.current_tab()
@@ -303,18 +332,36 @@ class PdfReaderWindow(QMainWindow):
     def enter_focus_mode(self) -> None:
         if self._focus_mode or self.current_tab() is None:
             return
+        self._pre_focus_state = self.windowState()
+        self.current_tab().pdf_view.begin_viewport_transition()
         self._focus_mode = True
-        self.toolbar_widget.hide()
-        self.tab_widget.tabBar().hide()
-        self.showFullScreen()
+        self.setUpdatesEnabled(False)
+        try:
+            self.toolbar_widget.hide()
+            self.tab_widget.tabBar().hide()
+            self.showFullScreen()
+        finally:
+            self.setUpdatesEnabled(True)
 
     def exit_focus_mode(self) -> None:
         if not self._focus_mode:
             return
+        tab = self.current_tab()
+        if tab is not None:
+            tab.pdf_view.begin_viewport_transition()
         self._focus_mode = False
-        self.toolbar_widget.show()
-        self.tab_widget.tabBar().show()
-        self.showMaximized()
+        self.setUpdatesEnabled(False)
+        try:
+            self.toolbar_widget.show()
+            self.tab_widget.tabBar().show()
+            # Restore native window state after layout constraints settle;
+            # showing controls can otherwise undo an earlier state change.
+            if self._pre_focus_state & Qt.WindowState.WindowMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        finally:
+            self.setUpdatesEnabled(True)
         self.raise_()
         self.activateWindow()
 

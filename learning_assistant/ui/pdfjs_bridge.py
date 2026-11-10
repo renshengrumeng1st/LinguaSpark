@@ -20,7 +20,12 @@ class PdfJsBridge(QObject):
     current_page_changed = Signal(int)
     zoom_changed = Signal(float)
     document_error = Signal(str)
+    viewport_ready = Signal(int)
     bridge_error = Signal(str)
+
+    @Slot(int)
+    def frame_ready(self, generation: int) -> None:
+        self.viewport_ready.emit(generation)
 
     @Slot(int)
     def ready(self, page_count: int) -> None:

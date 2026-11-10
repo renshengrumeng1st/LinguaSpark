@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -12,9 +13,50 @@ from PySide6.QtCore import QByteArray, QObject, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from learning_assistant.domain.models import DictionaryEntry, ModelProfile, QueryKind, QueryRequest
+from learning_assistant.services.model_providers import api_endpoint, provider_options
 
 
 PROMPT_VERSION = "learning-v2.2"
+OUTPUT_LIMIT_MESSAGE = "模型输出达到上限，内容被截断。请在模型配置中提高输出预算，或更换模型。"
+logger = logging.getLogger(__name__)
+
+
+def provider_request_options(profile: ModelProfile, *, json_output: bool = False) -> dict[str, Any]:
+    """Keep bounded learning requests out of providers' default thinking mode."""
+    return provider_options(profile.base_url, profile.model, json_output=json_output)
+
+
+def chat_request_payload(
+    profile: ModelProfile,
+    messages: list[dict[str, Any]],
+    *,
+    stream: bool,
+    temperature: float | None = None,
+    json_output: bool = False,
+) -> dict[str, Any]:
+    """Use the same request contract for learning, PDF, and connection probes."""
+    payload: dict[str, Any] = {
+        "model": profile.model.strip(), "messages": messages, "stream": stream,
+    }
+    model = profile.model.casefold()
+    openai_reasoning = QUrl(profile.base_url).host().casefold() == "api.openai.com" and (
+        re.match(r"^o[134](?:-|$)", model) is not None or model.startswith("gpt-5")
+    )
+    payload["max_completion_tokens" if openai_reasoning else "max_tokens"] = profile.max_output_tokens
+    if temperature is not None and not openai_reasoning:
+        payload["temperature"] = temperature
+    payload.update(provider_request_options(profile, json_output=json_output))
+    return payload
+
+
+def response_finish_reason(value: Any) -> str | None:
+    if isinstance(value, dict):
+        choices = value.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            reason = choices[0].get("finish_reason")
+            if isinstance(reason, str) and reason:
+                return reason
+    return None
 
 
 class SSEContentParser:
@@ -23,6 +65,56 @@ class SSEContentParser:
     def __init__(self):
         self.buffer = b""
         self.content: list[str] = []
+        self.finish_reason: str | None = None
+        self.reasoning_chars = 0
+        self.usage: dict[str, Any] = {}
+        self.api_error = False
+        self._data_lines: list[bytes] = []
+
+    def observe(self, value: Any) -> None:
+        """Retain diagnostic counts, never reasoning text or provider secrets."""
+        if not isinstance(value, dict):
+            return
+        self.finish_reason = response_finish_reason(value) or self.finish_reason
+        self.api_error = self.api_error or bool(value.get("error"))
+        if isinstance(value.get("usage"), dict):
+            self.usage.update(value["usage"])
+        choices = value.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            choice = choices[0]
+            message = choice.get("delta") or choice.get("message") or {}
+            if isinstance(message, dict):
+                reasoning = message.get("reasoning_content") or message.get("reasoning")
+                if isinstance(reasoning, str):
+                    self.reasoning_chars += len(reasoning)
+
+    def failure_message(self, text: str) -> str | None:
+        if self.api_error:
+            return "模型服务返回错误，请检查账户额度、模型权限或稍后重试。"
+        details = self.usage.get("completion_tokens_details")
+        reasoning_tokens = details.get("reasoning_tokens", 0) if isinstance(details, dict) else 0
+        if self.finish_reason == "length":
+            if not text.strip() and (self.reasoning_chars or reasoning_tokens):
+                return "模型的思考已耗尽输出预算，正文尚未生成而被截断。请提高模型配置中的输出预算，或使用支持关闭思考的模型。"
+            return OUTPUT_LIMIT_MESSAGE
+        if self.finish_reason in {"content_filter", "safety"}:
+            return "模型服务因内容过滤未完成回答，请调整输入后重试。"
+        if self.finish_reason in {"tool_calls", "function_call"}:
+            return "模型返回了工具调用，未完成学习内容，请选择支持直接文本回答的模型。"
+        if not text.strip():
+            return "模型没有返回正文，请检查模型的思考模式、输出预算和接口兼容性。"
+        return None
+
+    def log_failure(self, profile: ModelProfile, kind: str, text: str) -> None:
+        details = self.usage.get("completion_tokens_details")
+        reasoning_tokens = details.get("reasoning_tokens", 0) if isinstance(details, dict) else 0
+        logger.warning(
+            "AI response incomplete: provider=%s model=%s kind=%s finish_reason=%s "
+            "content_chars=%d reasoning_chars=%d completion_tokens=%s reasoning_tokens=%s budget=%d",
+            QUrl(profile.base_url).host(), profile.model, kind, self.finish_reason,
+            len(text), self.reasoning_chars, self.usage.get("completion_tokens"),
+            reasoning_tokens, profile.max_output_tokens,
+        )
 
     def feed(self, data: bytes) -> list[str]:
         self.buffer += data
@@ -30,15 +122,20 @@ class SSEContentParser:
         while b"\n" in self.buffer:
             raw, self.buffer = self.buffer.split(b"\n", 1)
             raw = raw.rstrip(b"\r")
-            if not raw.startswith(b"data:"):
+            if raw.startswith(b"data:"):
+                self._data_lines.append(raw[5:].lstrip(b" "))
                 continue
-            payload = raw[5:].strip()
+            if raw or not self._data_lines:
+                continue
+            payload = b"\n".join(self._data_lines).strip()
+            self._data_lines.clear()
             if not payload or payload == b"[DONE]":
                 continue
             try:
                 value = json.loads(payload)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
+            self.observe(value)
             text = extract_response_content(value)
             if text:
                 self.content.append(text)
@@ -46,26 +143,38 @@ class SSEContentParser:
         return emitted
 
     def close(self) -> list[str]:
-        if not self.buffer.strip():
-            return []
-        return self.feed(self.buffer + b"\n")
+        # feed already owns the pending bytes; appending them again duplicates
+        # an unterminated final frame. Flush both its line and event delimiter.
+        return self.feed(b"\n\n")
 
 
 def extract_response_content(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
     choices = value.get("choices") or []
-    if choices and isinstance(choices[0], dict):
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         choice = choices[0]
         delta = choice.get("delta")
         if isinstance(delta, dict) and delta.get("content"):
-            return str(delta["content"])
+            return _text_content(delta["content"])
         message = choice.get("message")
         if isinstance(message, dict) and message.get("content"):
-            return str(message["content"])
+            return _text_content(message["content"])
         if choice.get("content"):
-            return str(choice["content"])
-    return str(value.get("content", "")) if value.get("content") else ""
+            return _text_content(choice["content"])
+    return _text_content(value.get("content"))
+
+
+def _text_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+            and isinstance(part.get("text"), str)
+        )
+    return ""
 
 
 def parse_json_content(text: str) -> dict[str, Any]:
@@ -221,26 +330,8 @@ class QtAIClient(QObject):
 
     @staticmethod
     def _provider_messages(profile: ModelProfile, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        lower = profile.base_url.casefold()
-        if "longcat" in lower:
-            converted: list[dict[str, Any]] = []
-            for message in messages:
-                content = message.get("content", "")
-                if not isinstance(content, list):
-                    content = [{"type": "text", "text": str(content)}]
-                mapped: list[dict[str, Any]] = []
-                for item in content:
-                    if item.get("type") == "image_url":
-                        url = item.get("image_url", {}).get("url", "")
-                        data = url.split(",", 1)[1] if "," in url else url
-                        mapped.append({
-                            "type": "input_image",
-                            "input_image": {"type": "base64", "data": data},
-                        })
-                    else:
-                        mapped.append(item)
-                converted.append({"role": message.get("role", "user"), "content": mapped})
-            return converted
+        # Chat Completions uses strings for text and image_url for vision.
+        # Responses API input_image parts must not be sent to this endpoint.
         return messages
 
     def start(
@@ -256,23 +347,11 @@ class QtAIClient(QObject):
             if request.kind == QueryKind.WORD else self._sentence_messages(request)
         )
         messages = self._provider_messages(profile, messages)
-        payload = {
-            "model": profile.model,
-            "messages": messages,
-            "temperature": 0.2,
-            "stream": True,
-            "max_tokens": 1024,
-        }
-        lower_url = profile.base_url.casefold()
-        if "bigmodel" in lower_url:
-            # Translation/word explanation are deterministic tasks. GLM's
-            # default thinking spends latency and may consume the short JSON
-            # token budget before producing content.
-            payload["thinking"] = {"type": "disabled"}
-            payload["do_sample"] = False
-            if request.kind != QueryKind.IMAGE:
-                payload["response_format"] = {"type": "json_object"}
-        endpoint = profile.base_url.rstrip("/") + "/chat/completions"
+        payload = chat_request_payload(
+            profile, messages, stream=True, temperature=0.2,
+            json_output=request.kind != QueryKind.IMAGE,
+        )
+        endpoint = api_endpoint(profile.base_url, "chat/completions")
         network_request = QNetworkRequest(QUrl(endpoint))
         network_request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
         network_request.setRawHeader(b"Accept", b"text/event-stream, application/json")
@@ -333,7 +412,8 @@ class QtAIClient(QObject):
         if reply.bytesAvailable():
             self._on_ready_read(reply)
         self._requests.pop(reply, None)
-        context.parser.close()
+        for token in context.parser.close():
+            self.partial.emit(context.request_id, token)
         timings = self._timings(context)
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
         error = reply.error()
@@ -355,8 +435,15 @@ class QtAIClient(QObject):
             try:
                 response = json.loads(bytes(context.raw or b"{}"))
                 text = extract_response_content(response)
+                context.parser.observe(response)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 text = ""
+        failure = context.parser.failure_message(text)
+        if failure:
+            context.parser.log_failure(context.profile, context.kind.value, text)
+            self.failed.emit(context.request_id, failure, timings)
+            reply.deleteLater()
+            return
         structured = parse_json_content(text)
         if not structured:
             if context.kind == QueryKind.SENTENCE and text.strip():

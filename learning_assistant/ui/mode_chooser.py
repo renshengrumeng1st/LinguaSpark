@@ -50,25 +50,6 @@ class ModeChooser(QDialog):
         cards.addWidget(self.pdf_button)
         root.addLayout(cards, 1)
 
-        self.setStyleSheet(
-            """
-            QDialog { background: #f5f7f4; }
-            QLabel#chooserTitle { color: #17201b; font-size: 24px; font-weight: 700; }
-            QLabel#chooserSubtitle { color: #6b7280; font-size: 13px; }
-            QPushButton#modeCard {
-                background: white;
-                color: #26332b;
-                border: 1px solid #d8e2d8;
-                border-radius: 14px;
-                padding: 20px 16px;
-                font-size: 16px;
-                font-weight: 600;
-                text-align: center;
-            }
-            QPushButton#modeCard:hover { background: #eaf4e2; border-color: #95b995; }
-            QPushButton#modeCard:pressed { background: #dcebd4; }
-            """
-        )
 
     @staticmethod
     def _mode_card(title: str, description: str) -> QPushButton:

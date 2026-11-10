@@ -14,8 +14,10 @@ from learning_assistant.services.ai_client import (
     QtAIClient,
     SSEContentParser,
     extract_response_content,
+    chat_request_payload,
 )
 from learning_assistant.services.pdf_text import PdfTranslationStreamParser
+from learning_assistant.services.model_providers import api_endpoint
 
 
 PDF_PROMPT_VERSION = "pdf-selection-v1.0"
@@ -74,17 +76,7 @@ class QtPdfTranslationClient(QObject):
                 {"role": "user", "content": user},
             ],
         )
-        payload: dict = {
-            "model": profile.model,
-            "messages": messages,
-            "temperature": 0.1,
-            "stream": True,
-            "max_tokens": 768,
-        }
-        if "bigmodel" in profile.base_url.casefold():
-            payload["thinking"] = {"type": "disabled"}
-            payload["do_sample"] = False
-        return payload
+        return chat_request_payload(profile, messages, stream=True, temperature=0.1)
 
     def start(
         self,
@@ -96,7 +88,7 @@ class QtPdfTranslationClient(QObject):
         request_id = self._next_id
         payload = self.build_payload(profile, text, languages)
         request = QNetworkRequest(
-            QUrl(profile.base_url.rstrip("/") + "/chat/completions")
+            QUrl(api_endpoint(profile.base_url, "chat/completions"))
         )
         request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
         request.setRawHeader(b"Accept", b"text/event-stream, application/json")
@@ -187,10 +179,18 @@ class QtPdfTranslationClient(QObject):
             try:
                 response = json.loads(bytes(context.raw or b"{}"))
                 text = extract_response_content(response)
+                context.sse.observe(response)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 text = ""
             if text:
                 self._feed_tokens(context, [text])
+        text = "".join(context.sse.content) if context.sse.content else text
+        failure = context.sse.failure_message(text)
+        if failure:
+            context.sse.log_failure(context.profile, "pdf", text)
+            self.failed.emit(context.request_id, failure, timings)
+            reply.deleteLater()
+            return
         result = context.content.close()
         if not result.translation:
             self.failed.emit(context.request_id, "模型没有返回译文", timings)

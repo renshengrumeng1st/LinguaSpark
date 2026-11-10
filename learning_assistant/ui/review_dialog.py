@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -14,10 +15,12 @@ from learning_assistant.domain.models import LearningItem, ReviewRating
 from learning_assistant.services.speech import SpeechProvider
 from learning_assistant.storage.learning_repository import LearningRepository
 from learning_assistant.ui.result_views import text_label
+from learning_assistant.ui.theme_illustration import ThemeIllustration
 
 
 class ReviewDialog(QDialog):
     queue_changed = Signal()
+    pdf_source_requested = Signal(object)
 
     def __init__(
         self,
@@ -60,6 +63,9 @@ class ReviewDialog(QDialog):
         self.hint = text_label("", "muted", selectable=False)
         self.hint.setAlignment(Qt.AlignCenter)
         card_layout.addWidget(self.mode)
+        self.completion_art = ThemeIllustration()
+        self.completion_art.hide()
+        card_layout.addWidget(self.completion_art, 0, Qt.AlignCenter)
         card_layout.addStretch(1)
         card_layout.addWidget(self.prompt)
         card_layout.addWidget(self.hint)
@@ -69,6 +75,12 @@ class ReviewDialog(QDialog):
         self.answer.hide()
         card_layout.addWidget(self.answer)
         root.addWidget(self.card, 1)
+
+        self.pdf_source_button = QPushButton("返回来源 PDF")
+        self.pdf_source_button.setObjectName("secondary")
+        self.pdf_source_button.clicked.connect(self._open_pdf_source)
+        self.pdf_source_button.hide()
+        root.addWidget(self.pdf_source_button)
 
         self.reveal_button = QPushButton("显示答案")
         self.reveal_button.setObjectName("primary")
@@ -109,6 +121,8 @@ class ReviewDialog(QDialog):
         self.answer.hide()
         self.rating_row.hide()
         self.reveal_button.show()
+        self.pdf_source_button.hide()
+        self.completion_art.setVisible(self.current is None)
         if self.current is None:
             self.progress.setText("0 待复习")
             self.mode.setText("已完成")
@@ -123,6 +137,29 @@ class ReviewDialog(QDialog):
         self.prompt.setText(front)
         self.hint.setText("先在心里回答，再显示答案")
         self.answer.setText(answer)
+        source = self.current.payload.get("pdf_source")
+        if (isinstance(source, dict) and isinstance(source.get("path"), str)
+                and isinstance(source.get("page_index"), int) and source["page_index"] >= 0):
+            self.pdf_source_button.setText(f"返回 {Path(source['path']).name} · 第 {source['page_index'] + 1} 页")
+            self.pdf_source_button.setToolTip(source["path"])
+            self.pdf_source_button.show()
+
+    def _open_pdf_source(self) -> None:
+        if not self.current:
+            return
+        source = self.current.payload.get("pdf_source")
+        if not isinstance(source, dict):
+            return
+        try:
+            path = Path(source.get("path", ""))
+            if path.suffix.casefold() != ".pdf" or not path.is_file():
+                self.hint.setText("来源 PDF 已移动或删除，请恢复文件到原位置后重试。")
+                return
+        except (OSError, ValueError):
+            self.hint.setText("来源 PDF 暂时无法读取，请检查文件和访问权限。")
+            return
+        self.pdf_source_requested.emit(dict(source))
+        self.hide()
 
     @staticmethod
     def _card_content(item: LearningItem) -> tuple[str, str, bool]:
@@ -135,6 +172,10 @@ class ReviewDialog(QDialog):
         example = examples[0] if examples and isinstance(examples[0], dict) else {}
         sentence = str(example.get("sentence", "")).strip()
         translation = str(example.get("translation", "")).strip()
+        source = item.payload.get("pdf_source")
+        if isinstance(source, dict) and isinstance(source.get("selected_text"), str) and source["selected_text"].strip():
+            sentence = source["selected_text"].strip()
+            translation = str(source.get("translation", translation)).strip()
         # Alternate card types across successful reviews; a new card starts with meaning recall.
         if item.streak % 2 == 1 and sentence:
             pattern = re.compile(rf"\b{re.escape(item.source_text)}\b", re.IGNORECASE)

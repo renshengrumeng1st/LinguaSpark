@@ -6,12 +6,13 @@ import json
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QFile, QIODevice, QUrl, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QWheelEvent
+from PySide6.QtCore import QFile, QIODevice, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QColor, QResizeEvent, QWheelEvent
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import QLabel
 
 from learning_assistant.core.paths import project_root
 from learning_assistant.domain.pdf_models import PdfAnnotation, PdfTextSelection
@@ -42,6 +43,9 @@ _READER_HOOK = r"""
         let observedDocument = null;
         let requestedScale = 1;
         let requestedScaleMode = "custom";
+        let requestedPage = null;
+        let keepSelectionForActions = false;
+        let hasCommittedSelection = false;
 
         const style = document.createElement("link");
         style.rel = "stylesheet";
@@ -99,6 +103,9 @@ _READER_HOOK = r"""
         function reportSelection(event) {
             const selection = window.getSelection();
             if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+                if (keepSelectionForActions)
+                    return;
+                hasCommittedSelection = false;
                 const page = event?.target?.closest?.(".pdfViewer .page") || null;
                 if (page) {
                     const layer = page.querySelector(".textLayer");
@@ -109,6 +116,8 @@ _READER_HOOK = r"""
                 return;
             }
             const text = selection.toString();
+            keepSelectionForActions = false;
+            hasCommittedSelection = true;
             const pages = new Set();
             const rects = [];
             for (let index = 0; index < selection.rangeCount; index += 1) {
@@ -126,8 +135,9 @@ _READER_HOOK = r"""
                     pages.add(pageIndex);
                     rects.push({
                         page: pageIndex,
-                        x: (rect.left - page.bounds.left) / scale,
-                        y: (rect.top - page.bounds.top) / scale,
+                        // Absolute annotation children start inside the page border.
+                        x: (rect.left - page.bounds.left - page.element.clientLeft) / scale,
+                        y: (rect.top - page.bounds.top - page.element.clientTop) / scale,
                         width: rect.width / scale,
                         height: rect.height / scale,
                     });
@@ -202,8 +212,14 @@ _READER_HOOK = r"""
                 const viewer = application()?.pdfViewer;
                 requestedScale = Math.max(0.5, Math.min(3.0, Number(value)));
                 requestedScaleMode = "custom";
-                if (viewer)
-                    viewer.currentScale = requestedScale;
+                if (viewer) {
+                    // Keep the last painted canvas during a wheel/toolbar burst,
+                    // then replace it once with the final sharp render.
+                    viewer.updateScale({
+                        scaleFactor: requestedScale / viewer.currentScale,
+                        drawingDelay: 150,
+                    });
+                }
             },
             fitToWidth() {
                 const viewer = application()?.pdfViewer;
@@ -212,10 +228,48 @@ _READER_HOOK = r"""
                     viewer.currentScaleValue = "page-width";
             },
             clearSelection() {
+                keepSelectionForActions = false;
                 window.getSelection()?.removeAllRanges();
+            },
+            viewportChanged(generation) {
+                application()?.pdfViewer?.update();
+                // The first frame applies the new viewport; the next one
+                // lets Chromium submit its replacement compositor surface.
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    bridge.frame_ready(generation);
+                }));
+            },
+            goToPage(pageIndex) {
+                const app = application();
+                const count = Number(app?.pdfDocument?.numPages || 0);
+                requestedPage = Math.max(0, Math.trunc(Number(pageIndex)));
+                if (app?.pdfViewer?.pagesCount && count) {
+                    app.pdfViewer.scrollPageIntoView({pageNumber: Math.min(requestedPage + 1, count)});
+                }
             },
             renderAnnotations,
         };
+
+        window.addEventListener("blur", () => {
+            // Remove the browser's blue highlight immediately when the user
+            // moves to Qt controls, but retain the committed text for actions.
+            keepSelectionForActions = true;
+            window.getSelection()?.removeAllRanges();
+        });
+        document.addEventListener("pointerdown", event => {
+            if (event.button !== 0)
+                return;
+            keepSelectionForActions = false;
+            if (!event.shiftKey)
+                window.getSelection()?.removeAllRanges();
+        }, true);
+        document.addEventListener("selectionchange", () => {
+            const selection = window.getSelection();
+            if (hasCommittedSelection && !keepSelectionForActions && (!selection || selection.isCollapsed)) {
+                hasCommittedSelection = false;
+                bridge.commit(JSON.stringify({text: "", pages: [], rects: []}));
+            }
+        });
 
         document.addEventListener(
             "mouseup",
@@ -246,6 +300,8 @@ _READER_HOOK = r"""
                     app.pdfViewer.currentScaleValue = "page-width";
                 else
                     app.pdfViewer.currentScale = requestedScale;
+                if (requestedPage !== null)
+                    globalThis.linguaReader.goToPage(requestedPage);
                 setTimeout(renderAnnotations, 0);
             });
             app.eventBus.on("pagechanging", event => {
@@ -267,7 +323,7 @@ _READER_HOOK = r"""
     }
 
     function connect() {
-        if (!globalThis.qt || !qt.webChannelTransport) {
+        if (!document.documentElement || !globalThis.qt || !qt.webChannelTransport) {
             setTimeout(connect, 25);
             return;
         }
@@ -329,6 +385,17 @@ class PdfJsViewAdapter(QWebEngineView):
         self._zoom_factor = 1.0
         self._zoom_mode = QPdfView.ZoomMode.Custom
         self._ready = False
+        self._pending_page: int | None = None
+        self._page_count = 0
+        self._viewport_generation = 0
+        self._viewport_preview = QLabel(self)
+        self._viewport_preview.setScaledContents(True)
+        self._viewport_preview.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._viewport_preview.hide()
+        self._viewport_timer = QTimer(self)
+        self._viewport_timer.setSingleShot(True)
+        self._viewport_timer.setInterval(40)
+        self._viewport_timer.timeout.connect(self._request_viewport_frame)
 
         self._bridge = PdfJsBridge(self)
         self._bridge.selection_changed.connect(self._selection_received)
@@ -338,6 +405,7 @@ class PdfJsViewAdapter(QWebEngineView):
         self._bridge.zoom_changed.connect(self._browser_zoom_changed)
         self._bridge.document_error.connect(self._document_error)
         self._bridge.bridge_error.connect(self.load_failed)
+        self._bridge.viewport_ready.connect(self._viewport_frame_ready)
 
         self._channel = QWebChannel(self.page())
         self._channel.registerObject("pdfJsBridge", self._bridge)
@@ -397,6 +465,10 @@ class PdfJsViewAdapter(QWebEngineView):
         return True
 
     def close_document(self) -> None:
+        self._viewport_timer.stop()
+        self._viewport_generation += 1
+        self._viewport_preview.hide()
+        self._viewport_preview.clear()
         self.stop()
         server, self._server = self._server, None
         self._ready = False
@@ -404,6 +476,8 @@ class PdfJsViewAdapter(QWebEngineView):
         self._document_key = ""
         self._selection = None
         self._annotations = []
+        self._pending_page = None
+        self._page_count = 0
         if server is not None:
             self.setUrl(QUrl("about:blank"))
             server.stop()
@@ -436,6 +510,9 @@ class PdfJsViewAdapter(QWebEngineView):
         self._theme_id = theme_id if theme_id in READING_THEMES else "eye_care"
         paper = READING_THEMES[self._theme_id]
         workspace = self._workspace_color(paper)
+        # Qt's native surface must also have an opaque background while the
+        # Chromium compositor is resizing during a fullscreen transition.
+        self.page().setBackgroundColor(QColor(workspace))
         self._run_reader(
             "linguaReader.setTheme("
             f"{json.dumps(self._theme_id)}, {json.dumps(paper)}, {json.dumps(workspace)}"
@@ -471,6 +548,17 @@ class PdfJsViewAdapter(QWebEngineView):
         self._zoom_mode = QPdfView.ZoomMode.FitToWidth
         self._run_reader("linguaReader.fitToWidth();")
 
+    def go_to_page(self, page_index: int) -> bool:
+        if (not isinstance(page_index, int) or isinstance(page_index, bool)
+                or page_index < 0 or self._path is None):
+            return False
+        self._pending_page = page_index
+        if self._ready:
+            target = min(page_index, max(0, self._page_count - 1))
+            self._run_reader(f"linguaReader.goToPage({target});")
+            self._pending_page = None
+        return True
+
     def _adjust_zoom_from_wheel(
         self,
         delta: int,
@@ -486,6 +574,38 @@ class PdfJsViewAdapter(QWebEngineView):
             event.accept()
             return
         super().wheelEvent(event)
+
+    def begin_viewport_transition(self) -> None:
+        """Keep a complete frame visible while the native PDF viewport resizes."""
+        if not self._ready or not self.isVisible():
+            return
+        if self._viewport_preview.isHidden():
+            frame = self.grab()
+            if frame.isNull():
+                return
+            self._viewport_preview.setPixmap(frame)
+        self._viewport_preview.setGeometry(self.rect())
+        self._viewport_preview.show()
+        self._viewport_preview.raise_()
+        self._viewport_generation += 1
+        self._viewport_timer.start()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_viewport_preview") and not self._viewport_preview.isHidden():
+            self._viewport_preview.setGeometry(self.rect())
+            self._viewport_preview.raise_()
+            self._viewport_generation += 1
+            self._viewport_timer.start()
+
+    def _request_viewport_frame(self) -> None:
+        self._run_reader(f"linguaReader.viewportChanged({self._viewport_generation});")
+
+    def _viewport_frame_ready(self, generation: int) -> None:
+        if generation != self._viewport_generation or self._viewport_timer.isActive():
+            return
+        self._viewport_preview.hide()
+        self._viewport_preview.clear()
 
     def _run_reader(self, statement: str) -> None:
         if self._ready:
@@ -508,9 +628,12 @@ class PdfJsViewAdapter(QWebEngineView):
         if self._server is None or self._path is None:
             return
         self._ready = True
+        self._page_count = page_count
         self.set_reading_theme(self._theme_id)
         self.set_annotations(self._annotations)
         self.set_zoom_factor(self._zoom_factor)
+        if self._pending_page is not None:
+            self.go_to_page(self._pending_page)
         self.document_loaded.emit(self._document_key, page_count)
 
     def _browser_zoom_changed(self, factor: float) -> None:

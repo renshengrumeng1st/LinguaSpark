@@ -6,18 +6,19 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTabWidget,
+    QFrame, QListWidget, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
 from learning_assistant.core.settings import SettingsStore
-from learning_assistant.domain.models import ModelProfile
 from learning_assistant.services.autostart import AutostartError, AutostartService
 from learning_assistant.services.selection import GlobalHotkeyService
+from learning_assistant.ui.appearance_settings import AppearanceSettingsPage
+from learning_assistant.ui.model_settings import ModelSettingsPage
 
 
 class HotkeyEdit(QLineEdit):
-    """Record exactly one global-hotkey chord in a predictable format."""
+    """Record exactly one shortcut chord in a predictable format."""
 
     def __init__(self, value: str = "", parent: QWidget | None = None):
         super().__init__(parent)
@@ -78,23 +79,109 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.autostart = autostart or AutostartService()
-        self.setWindowTitle("设置")
-        self.resize(570, 520)
-        layout = QVBoxLayout(self)
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._general_tab(), "常规")
-        self.tabs.addTab(self._models_tab(), "AI 模型")
-        self.tabs.addTab(self._learning_tab(), "学习与发音")
-        self.tabs.addTab(self._hotkeys_tab(), "快捷键")
-        layout.addWidget(self.tabs)
+        self.setWindowTitle("LinguaSpark · 设置")
+        self.resize(1040, 760)
+        self.setMinimumSize(940, 680)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("settingsSidebar")
+        sidebar.setFixedWidth(190)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(18, 26, 18, 22)
+        side.setSpacing(16)
+        mark = QLabel("✦")
+        mark.setObjectName("brandMark")
+        mark.setFixedSize(36, 36)
+        mark.setAlignment(Qt.AlignCenter)
+        side.addWidget(mark)
+        brand = QLabel("LinguaSpark")
+        brand.setObjectName("navBrand")
+        side.addWidget(brand)
+        tagline = QLabel("你的 AI 学习空间")
+        tagline.setObjectName("muted")
+        side.addWidget(tagline)
+        side.addSpacing(16)
+        self.navigation = QListWidget()
+        self.navigation.setObjectName("settingsNavigation")
+        self.navigation.addItems(["常规设置", "AI 模型", "外观与风格", "学习与发音", "快捷键"])
+        side.addWidget(self.navigation, 1)
+        side_note = QLabel("本机保存偏好\n让每次学习更顺手")
+        side_note.setObjectName("muted")
+        side.addWidget(side_note)
+        layout.addWidget(sidebar)
+
+        content = QWidget()
+        content.setObjectName("settingsContent")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(28, 24, 28, 20)
+        root.setSpacing(16)
+        self.page_title = QLabel()
+        self.page_title.setObjectName("pageTitle")
+        self.page_subtitle = QLabel()
+        self.page_subtitle.setObjectName("muted")
+        self.page_subtitle.setWordWrap(True)
+        root.addWidget(self.page_title)
+        root.addWidget(self.page_subtitle)
+        self.pages = QStackedWidget()
+        self.model_page = ModelSettingsPage(settings)
+        self.appearance_page = AppearanceSettingsPage(settings)
+        self.model_page.settings_changed.connect(self.settings_changed)
+        self.appearance_page.settings_changed.connect(self.settings_changed)
+        self._page_titles = [
+            ("常规设置", "安排启动与后台运行，让学习工具随时待命。"),
+            ("AI 模型", "添加、编辑和验证模型连接，选择你的学习伙伴。"),
+            ("外观与风格", "喜欢星光、夜色还是自然？这里都可以找到。"),
+            ("学习与发音", "选择学习语言、发音方式和适合自己的学习节奏。"),
+            ("快捷键", "设置窗口、划词翻译与 PDF 标记的常用按键。"),
+        ]
+        for page, card in ((self._general_tab(), True), (self.model_page, False),
+                           (self.appearance_page, False), (self._learning_tab(), True),
+                           (self._hotkeys_tab(), True)):
+            self.pages.addWidget(self._scroll_page(page, card))
+        root.addWidget(self.pages, 1)
         footer = QHBoxLayout()
-        footer.addStretch(1)
+        note = QLabel("配置与学习记录保存在当前 Windows 账户中。")
+        note.setObjectName("muted")
+        footer.addWidget(note, 1)
         close_button = QPushButton("完成")
         close_button.setObjectName("primary")
         close_button.clicked.connect(self.accept)
         footer.addWidget(close_button)
-        layout.addLayout(footer)
-        self._refresh_models()
+        root.addLayout(footer)
+        layout.addWidget(content, 1)
+        self.navigation.currentRowChanged.connect(self._navigate)
+        self.navigation.setCurrentRow(1)
+        self.finished.connect(lambda _result: self.model_page.cancel_connection())
+        self.finished.connect(lambda _result: self.model_page.cancel_catalog())
+
+    @staticmethod
+    def _scroll_page(page: QWidget, card: bool) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        if card:
+            frame = QFrame()
+            frame.setObjectName("settingsCard")
+            wrapper = QVBoxLayout(frame)
+            wrapper.setContentsMargins(22, 22, 22, 22)
+            page.layout().setContentsMargins(0, 0, 0, 0)
+            page.layout().setSpacing(16)
+            wrapper.addWidget(page)
+            scroll.setWidget(frame)
+        else:
+            scroll.setWidget(page)
+        return scroll
+
+    def _navigate(self, index: int) -> None:
+        if 0 <= index < len(self._page_titles):
+            self.pages.setCurrentIndex(index)
+            self.page_title.setText(self._page_titles[index][0])
+            self.page_subtitle.setText(self._page_titles[index][1])
+
 
     def _general_tab(self) -> QWidget:
         page = QWidget()
@@ -142,53 +229,6 @@ class SettingsDialog(QDialog):
         self.autostart_checkbox.setChecked(actual)
         self.autostart_status.setText("开机自启已开启。" if actual else "开机自启已关闭。")
 
-    def _models_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QHBoxLayout(page)
-        left = QVBoxLayout()
-        left.addWidget(QLabel("已添加模型"))
-        self.model_list = QListWidget()
-        self.model_list.currentItemChanged.connect(self._load_selected)
-        left.addWidget(self.model_list, 1)
-        select_button = QPushButton("设为当前模型")
-        select_button.setObjectName("secondary")
-        select_button.clicked.connect(self._select_model)
-        remove_button = QPushButton("删除")
-        remove_button.setObjectName("ghost")
-        remove_button.clicked.connect(self._remove_model)
-        left_buttons = QHBoxLayout()
-        left_buttons.addWidget(select_button)
-        left_buttons.addWidget(remove_button)
-        left.addLayout(left_buttons)
-
-        right = QVBoxLayout()
-        form = QFormLayout()
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("例如：快速翻译")
-        self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("https://api.example.com/v1")
-        self.key_edit = QLineEdit()
-        self.key_edit.setEchoMode(QLineEdit.Password)
-        self.key_edit.setPlaceholderText("API Key")
-        self.model_edit = QLineEdit()
-        self.model_edit.setPlaceholderText("模型 ID")
-        form.addRow("显示名称", self.name_edit)
-        form.addRow("Base URL", self.url_edit)
-        form.addRow("API Key", self.key_edit)
-        form.addRow("模型", self.model_edit)
-        right.addLayout(form)
-        hint = QLabel("API Key 使用 Windows DPAPI 加密，且不会打包进程序。")
-        hint.setObjectName("muted")
-        hint.setWordWrap(True)
-        right.addWidget(hint)
-        save_button = QPushButton("保存模型")
-        save_button.setObjectName("primary")
-        save_button.clicked.connect(self._save_model)
-        right.addWidget(save_button)
-        right.addStretch(1)
-        layout.addLayout(left, 5)
-        layout.addLayout(right, 6)
-        return page
 
     def _hotkeys_tab(self) -> QWidget:
         page = QWidget()
@@ -200,12 +240,21 @@ class SettingsDialog(QDialog):
         self.selection_hotkey = HotkeyEdit(
             str(self.settings.get("selection_hotkey", "Alt+W"))
         )
+        self.pdf_highlight_hotkey = HotkeyEdit(
+            str(self.settings.get("pdf_highlight_hotkey", "Ctrl+H"))
+        )
+        self.pdf_remove_highlight_hotkey = HotkeyEdit(
+            str(self.settings.get("pdf_remove_highlight_hotkey", "Ctrl+R"))
+        )
         form.addRow("显示/隐藏窗口", self.window_hotkey)
         form.addRow("翻译选中文字", self.selection_hotkey)
+        form.addRow("PDF 标记", self.pdf_highlight_hotkey)
+        form.addRow("PDF 移除标记", self.pdf_remove_highlight_hotkey)
         root.addLayout(form)
         hint = QLabel(
             "点击输入框后，直接按下想使用的组合键。建议至少包含 Ctrl、Alt、Shift 或 Win，"
             "避免覆盖普通按键。打开设置期间，全局快捷键会暂时停用。"
+            "PDF 标记快捷键仅在当前 PDF 标签中生效。"
         )
         hint.setObjectName("muted")
         hint.setWordWrap(True)
@@ -230,15 +279,22 @@ class SettingsDialog(QDialog):
     def _reset_hotkeys(self) -> None:
         self.window_hotkey.setText("Alt+Q")
         self.selection_hotkey.setText("Alt+W")
+        self.pdf_highlight_hotkey.setText("Ctrl+H")
+        self.pdf_remove_highlight_hotkey.setText("Ctrl+R")
 
     @staticmethod
-    def _validated_hotkeys(window: str, selection: str) -> dict[str, str]:
+    def _validated_hotkeys(
+        window: str, selection: str,
+        highlight: str = "Ctrl+H", remove_highlight: str = "Ctrl+R",
+    ) -> dict[str, str]:
         values = {
             "window_hotkey": window.strip(),
             "selection_hotkey": selection.strip(),
+            "pdf_highlight_hotkey": highlight.strip(),
+            "pdf_remove_highlight_hotkey": remove_highlight.strip(),
         }
         if not all(values.values()):
-            raise ValueError("两个快捷键都不能为空。")
+            raise ValueError("快捷键都不能为空。")
         try:
             parsed = {
                 name: GlobalHotkeyService._parse(value)
@@ -250,8 +306,8 @@ class SettingsDialog(QDialog):
             key_part = values[name].replace("-", "+").split("+")[-1].strip().casefold()
             if modifiers == 0 and not (key_part.startswith("f") and key_part[1:].isdigit()):
                 raise ValueError("字母或数字快捷键必须搭配 Ctrl、Alt、Shift 或 Win。")
-        if parsed["window_hotkey"] == parsed["selection_hotkey"]:
-            raise ValueError("两个功能不能使用相同的快捷键。")
+        if len(set(parsed.values())) != len(parsed):
+            raise ValueError("不同功能不能使用相同的快捷键。")
         return {
             name: GlobalHotkeyService.format_binding(value)
             for name, value in values.items()
@@ -260,7 +316,8 @@ class SettingsDialog(QDialog):
     def _save_hotkeys(self) -> None:
         try:
             values = self._validated_hotkeys(
-                self.window_hotkey.text(), self.selection_hotkey.text()
+                self.window_hotkey.text(), self.selection_hotkey.text(),
+                self.pdf_highlight_hotkey.text(), self.pdf_remove_highlight_hotkey.text(),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "快捷键不可用", str(exc))
@@ -328,7 +385,7 @@ class SettingsDialog(QDialog):
         form.addRow("Azure 区域", self.azure_region)
         form.addRow("Azure 密钥", self.azure_key_edit)
         form.addRow("神经声音", self.azure_voice)
-        tts_hint = QLabel("神经语音音质更自然；密钥同样使用 Windows DPAPI 加密。未配置时可使用离线本地语音。")
+        tts_hint = QLabel("神经语音音质更自然；密钥会通过当前 Windows 账户加密保存。未配置时可使用离线本地语音。")
         tts_hint.setObjectName("muted")
         tts_hint.setWordWrap(True)
         form.addRow("", tts_hint)
@@ -344,63 +401,6 @@ class SettingsDialog(QDialog):
         if index >= 0:
             combo.setCurrentIndex(index)
 
-    def _refresh_models(self) -> None:
-        current_id = self.settings.get("active_model_id", "")
-        self.model_list.clear()
-        selected = None
-        for profile in self.settings.models():
-            prefix = "当前 · " if profile.id == current_id else ""
-            item = QListWidgetItem(prefix + (profile.name or profile.model))
-            item.setData(Qt.UserRole, profile.id)
-            self.model_list.addItem(item)
-            if profile.id == current_id:
-                selected = item
-        if selected:
-            self.model_list.setCurrentItem(selected)
-
-    def _selected_profile(self) -> ModelProfile | None:
-        item = self.model_list.currentItem()
-        identifier = item.data(Qt.UserRole) if item else ""
-        return next((model for model in self.settings.models() if model.id == identifier), None)
-
-    def _load_selected(self, current, previous=None) -> None:
-        profile = self._selected_profile()
-        if not profile:
-            return
-        self.name_edit.setText(profile.name)
-        self.url_edit.setText(profile.base_url)
-        self.key_edit.setText(profile.api_key)
-        self.model_edit.setText(profile.model)
-
-    def _save_model(self) -> None:
-        base_url = self.url_edit.text().strip()
-        api_key = self.key_edit.text().strip()
-        model = self.model_edit.text().strip()
-        name = self.name_edit.text().strip() or model
-        if not all((base_url, api_key, model)):
-            QMessageBox.warning(self, "信息不完整", "请填写 Base URL、API Key 和模型 ID。")
-            return
-        identifier = self.settings.model_id(base_url, model)
-        self.settings.upsert_model(ModelProfile(
-            id=identifier, name=name, base_url=base_url, model=model, api_key=api_key,
-        ))
-        self._refresh_models()
-        self.settings_changed.emit()
-
-    def _select_model(self) -> None:
-        profile = self._selected_profile()
-        if profile and self.settings.select_model(profile.id):
-            self._refresh_models()
-            self.settings_changed.emit()
-
-    def _remove_model(self) -> None:
-        profile = self._selected_profile()
-        if not profile:
-            return
-        if QMessageBox.question(self, "删除模型", f"确定删除“{profile.name}”？") == QMessageBox.Yes:
-            self.settings.remove_model(profile.id)
-            self._refresh_models()
-            self.settings_changed.emit()
 
     def _save_learning(self) -> None:
         self.settings.set("languages", {

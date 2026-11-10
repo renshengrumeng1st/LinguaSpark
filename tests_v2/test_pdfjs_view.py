@@ -7,10 +7,11 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtTest import QSignalSpy
+from PySide6.QtQml import QJSEngine
 
 from learning_assistant.core.paths import project_root
 from learning_assistant.domain.pdf_models import PdfAnnotation, PdfTextSelection
-from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter, _READER_CSS
+from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter, _READER_CSS, _READER_HOOK
 
 
 def test_reader_theme_styles_live_in_the_bundled_asset_tree() -> None:
@@ -18,6 +19,26 @@ def test_reader_theme_styles_live_in_the_bundled_asset_tree() -> None:
     bundled_assets = (project_root() / "assets").resolve()
 
     assert _READER_CSS.resolve().is_relative_to(bundled_assets)
+
+
+def test_reader_bridge_waits_for_document_root_before_opening_channel(qapp) -> None:
+    engine = QJSEngine()
+    engine.evaluate("""
+        var globalThis = this;
+        var document = {documentElement: null};
+        var qt = {webChannelTransport: {}};
+        var pending = [];
+        var channelCalls = 0;
+        function setTimeout(callback) { pending.push(callback); }
+        function QWebChannel() { channelCalls += 1; }
+    """)
+    result = engine.evaluate(_READER_HOOK)
+    assert not result.isError(), result.toString()
+    assert engine.evaluate("channelCalls").toInt() == 0
+    assert engine.evaluate("pending.length").toInt() == 1
+    result = engine.evaluate("document.documentElement = {}; pending.shift()();")
+    assert not result.isError(), result.toString()
+    assert engine.evaluate("channelCalls").toInt() == 1
 
 
 def _write_three_line_pdf(path: Path) -> None:
@@ -263,6 +284,78 @@ def test_ctrl_wheel_routes_to_reader_zoom(qtbot) -> None:
     view._adjust_zoom_from_wheel(120, Qt.KeyboardModifier.ControlModifier)
 
     assert view.zoomFactor() == pytest.approx(1.1)
+
+
+def test_saved_highlight_matches_selected_text_after_zoom(qtbot, tmp_path):
+    """Page borders must not shift saved partial, multiline selections."""
+    document = tmp_path / "alignment.pdf"
+    _write_three_line_pdf(document)
+    view = PdfJsViewAdapter()
+    qtbot.addWidget(view)
+    view.resize(900, 760)
+    selections = QSignalSpy(view.selection_changed)
+    try:
+        view.show()
+        assert view.load_file(document)
+        qtbot.waitUntil(lambda: bool(_run_javascript(qtbot, view, """
+            document.querySelectorAll('.page .textLayer span').length >= 3
+                && !document.querySelector('.page .textLayer').hidden
+        """)), timeout=15_000)
+        view.set_zoom_factor(1.3)
+        qtbot.waitUntil(lambda: bool(_run_javascript(qtbot, view, """
+            Math.abs(PDFViewerApplication.pdfViewer.currentScale - 1.3) < 0.001
+                && !document.querySelector('.page .textLayer').hidden
+        """)), timeout=8_000)
+        select_text = """
+            (() => {
+                const spans = [...document.querySelectorAll('.page .textLayer span')]
+                    .filter(span => span.textContent.trim());
+                const range = document.createRange();
+                range.setStart(spans[0].firstChild, 3);
+                range.setEnd(spans[2].firstChild, 8);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return range;
+            })()
+        """
+        _run_javascript(qtbot, view, select_text + "; document.dispatchEvent(new MouseEvent('mouseup'));")
+        qtbot.waitUntil(lambda: selections.count() > 0, timeout=5_000)
+        selection = selections.at(selections.count() - 1)[0]
+        assert selection.can_annotate
+        view.set_annotations([PdfAnnotation(
+            1, view.document_key, 0, selection.start_index, selection.end_index,
+            selection.text, "yellow", selection.bounds, 0,
+        )])
+        qtbot.waitUntil(lambda: bool(_run_javascript(qtbot, view,
+            "Boolean(document.querySelector('.linguaspark-annotation'))")), timeout=5_000)
+        for zoom in (1.3, 2.0):
+            view.set_zoom_factor(zoom)
+            qtbot.waitUntil(lambda: view.zoomFactor() == pytest.approx(zoom), timeout=8_000)
+            qtbot.waitUntil(lambda: bool(_run_javascript(qtbot, view,
+                f"Math.abs(PDFViewerApplication.pdfViewer.currentScale - {zoom}) < 0.001"
+                " && document.querySelector('.page .textLayer span')?.getBoundingClientRect().width > 0"
+                " && !document.querySelector('.page .textLayer').hidden")), timeout=8_000)
+            # Recreate the same text range after PDF.js has rebuilt its text layer.
+            errors = json.loads(_run_javascript(qtbot, view, """
+                (() => {
+                    const range = SELECT_TEXT;
+                    const rects = [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
+                    const marks = [...document.querySelectorAll('.linguaspark-annotation')];
+                    return JSON.stringify(rects.map((rect, i) => {
+                        const mark = marks[i].getBoundingClientRect();
+                        return ['left', 'top', 'width', 'height'].map(key => mark[key] - rect[key]);
+                    }));
+                })()
+            """.replace("SELECT_TEXT", select_text)))
+            assert len(errors) >= 3
+            for offsets in errors:
+                # Text-layer font rounding can change the glyph box by a pixel
+                # between renders; the old page-border error is 9+ pixels.
+                assert offsets == pytest.approx([0, 0, 0, 0], abs=1.5)
+    finally:
+        view.close_document()
+        view.close()
 
 
 def test_image_only_page_surfaces_ocr_feedback_and_clears_selection(qtbot) -> None:

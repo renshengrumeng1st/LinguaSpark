@@ -24,7 +24,7 @@ from learning_assistant.ui.main_window import MainWindow
 from learning_assistant.ui.mode_chooser import ModeChooser
 from learning_assistant.ui.pdf_reader_window import PdfReaderWindow
 from learning_assistant.ui.selection_popup import SelectionPopup
-from learning_assistant.ui.theme import APP_QSS
+from learning_assistant.ui.theme import apply_app_theme
 
 
 logger = logging.getLogger(__name__)
@@ -87,9 +87,8 @@ class LearningAssistantApplication:
         self.qt.setOrganizationName("LinguaSpark")
         self.qt.setQuitOnLastWindowClosed(False)
         self.app_icon = self._install_application_icon()
-        self.qt.setStyleSheet(APP_QSS)
-
         self.settings = SettingsStore()
+        apply_app_theme(str(self.settings.get("appearance", {}).get("theme", "sakura")))
         self.autostart = AutostartService()
         self.dictionary = DictionaryRepository()
         self.dictionary.warmup()
@@ -140,13 +139,25 @@ class LearningAssistantApplication:
         window.review_count_changed.connect(self._refresh_review_action)
         window.settings_opened.connect(self.hotkeys.stop)
         window.settings_closed.connect(self._reload_hotkeys)
+        window.pdf_source_requested.connect(self._open_pdf_source)
         return window
 
     def _create_pdf_window(self) -> PdfReaderWindow:
         window = PdfReaderWindow(self.settings, self._create_pdf_controller)
         window.compact_mode_requested.connect(self.mode_router.show_compact)
         window.settings_requested.connect(self._open_settings)
+        window.review_requested.connect(lambda: self._ensure_compact_window().open_review())
+        window.learning_changed.connect(self._learning_changed)
         return window
+
+    def _learning_changed(self) -> None:
+        if self.main_window is not None:
+            self.main_window.refresh_review_count()
+        self._refresh_review_action(self.repository.due_learning_count())
+
+    def _open_pdf_source(self, source: dict) -> None:
+        window = self.mode_router.show_pdf()
+        window.open_source(source)
 
     def _create_pdf_controller(self) -> PdfTranslationController:
         if self.pdf_client is None:
@@ -185,8 +196,6 @@ class LearningAssistantApplication:
         selection = self._hotkey_label("selection_hotkey", "Alt+W")
         tray.setToolTip(f"LinguaSpark · {window} 呼出 · {selection} 划词")
         menu = QMenu()
-        show_action = QAction("选择模式", menu)
-        show_action.triggered.connect(self.mode_router.show_chooser)
         compact_action = QAction("便捷模式", menu)
         compact_action.triggered.connect(self.mode_router.show_compact)
         pdf_action = QAction("PDF 阅读模式", menu)
@@ -199,7 +208,6 @@ class LearningAssistantApplication:
         )
         quit_action = QAction("退出", menu)
         quit_action.triggered.connect(self.quit)
-        menu.addAction(show_action)
         menu.addAction(compact_action)
         menu.addAction(pdf_action)
         menu.addSeparator()
@@ -277,6 +285,8 @@ class LearningAssistantApplication:
         self.tray.setToolTip(
             f"LinguaSpark · {window} 呼出 · {selection} 划词"
         )
+        if self.mode_router.pdf_window is not None:
+            self.mode_router.pdf_window.reload_shortcuts()
 
     def _hotkey_registration_failed(self, name: str, binding: str) -> None:
         label = "显示窗口" if name == "window" else "划词翻译"

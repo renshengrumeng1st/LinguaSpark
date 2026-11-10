@@ -150,6 +150,19 @@ class LearningRepository:
         source_language: str,
         target_language: str,
     ) -> None:
+        db = self._connection()
+        latest = db.execute("SELECT id, source_text, query_kind, source_language, target_language, result_json FROM query_history ORDER BY id DESC LIMIT 1").fetchone()
+        if latest and (latest["source_text"], latest["query_kind"], latest["source_language"], latest["target_language"]) == (source_text[:4000], query_kind, source_language, target_language):
+            try:
+                previous = json.loads(latest["result_json"])
+            except (ValueError, TypeError):
+                previous = {}
+            if isinstance(previous, dict):
+                result = {**previous, **result}
+            db.execute("UPDATE query_history SET result_json = ?, created_at = ? WHERE id = ?",
+                       (json.dumps(result, ensure_ascii=False), int(time.time()), latest["id"]))
+            db.commit()
+            return
         self._connection().execute(
             """INSERT INTO query_history(
                 source_text, query_kind, result_json, source_language,
@@ -162,6 +175,56 @@ class LearningRepository:
             ),
         )
         self._connection().commit()
+
+    def saved_items(self, collection: str = "history", search: str = "", kind: str = "",
+                    limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        if collection not in ("history", "favorites"):
+            raise ValueError("Unknown saved collection")
+        if collection == "history":
+            table, identifier, payload = "query_history", "id", "result_json"
+        else:
+            table, identifier, payload = "favorites", "item_key", "payload"
+        where, parameters = [], []
+        if search.strip():
+            where.append(f"(instr(lower(source_text), lower(?)) > 0 OR instr(lower({payload}), lower(?)) > 0)")
+            parameters.extend([search.strip(), search.strip()])
+        if kind:
+            where.append("query_kind = ?")
+            parameters.append(kind)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        rows = self._connection().execute(
+            f"SELECT *, {identifier} AS identifier FROM {table}{clause} ORDER BY created_at DESC, {identifier} DESC LIMIT ? OFFSET ?",
+            (*parameters, max(1, min(int(limit), 1000)), max(0, int(offset))),
+        ).fetchall()
+        items = []
+        for row in rows:
+            try:
+                value = json.loads(row[payload])
+            except (ValueError, TypeError):
+                value = {}
+            items.append({"identifier": row["identifier"], "source_text": row["source_text"],
+                          "query_kind": row["query_kind"], "payload": value if isinstance(value, dict) else {},
+                          "created_at": row["created_at"], "context": row["context"] if collection == "favorites" else ""})
+        return items
+
+    def delete_saved(self, collection: str, identifier: str | int) -> bool:
+        if collection not in ("history", "favorites"):
+            raise ValueError("Unknown saved collection")
+        table, column = ("query_history", "id") if collection == "history" else ("favorites", "item_key")
+        cursor = self._connection().execute(f"DELETE FROM {table} WHERE {column} = ?", (identifier,))
+        self._connection().commit()
+        return bool(cursor.rowcount)
+
+    def delete_history(self, identifiers: list[int]) -> int:
+        """Delete exactly these history rows in a single transaction."""
+        identifiers = list(dict.fromkeys(int(value) for value in identifiers))
+        if not identifiers:
+            return 0
+        db = self._connection()
+        with db:
+            cursor = db.executemany("DELETE FROM query_history WHERE id = ?",
+                                    ((value,) for value in identifiers))
+        return cursor.rowcount
 
     def toggle_favorite(
         self, source_text: str, query_kind: str, payload: dict[str, Any], context: str = ""
@@ -250,10 +313,60 @@ class LearningRepository:
             "SELECT 1 FROM learning_items WHERE item_key = ?", (key,)
         ).fetchone())
 
+    def add_learning_item(
+        self,
+        source_text: str,
+        query_kind: str,
+        payload: dict[str, Any],
+        context: str = "",
+        source_language: str = "en",
+        target_language: str = "zh-CN",
+        now: int | None = None,
+    ) -> bool:
+        """Idempotent addition: preserve reviews and enrich missing PDF context."""
+        key = self.stable_key(query_kind, source_text.casefold())
+        timestamp = int(time.time()) if now is None else int(now)
+        db = self._connection()
+        cursor = db.execute(
+            """INSERT OR IGNORE INTO learning_items(
+                item_key, source_text, query_kind, payload, context,
+                source_language, target_language, created_at, updated_at, due_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (key, source_text, query_kind, json.dumps(payload, ensure_ascii=False),
+             context[:2000], source_language, target_language, timestamp, timestamp, timestamp),
+        )
+        created = cursor.rowcount == 1
+        if not created and isinstance(payload.get("pdf_source"), dict):
+            row = db.execute("SELECT * FROM learning_items WHERE item_key = ?", (key,)).fetchone()
+            existing = self._learning_item(row)
+            if not isinstance(existing.payload.get("pdf_source"), dict):
+                merged = dict(existing.payload)
+                merged["pdf_source"] = payload["pdf_source"]
+                note = dict(merged.get("ai_note") or {})
+                if not note.get("examples"):
+                    note["examples"] = payload.get("ai_note", {}).get("examples", [])
+                    merged["ai_note"] = note
+                db.execute(
+                    "UPDATE learning_items SET payload = ?, context = ?, updated_at = ? WHERE item_key = ?",
+                    (json.dumps(merged, ensure_ascii=False), existing.context or context[:2000], timestamp, key),
+                )
+        db.commit()
+        return created
+
     def update_learning_payload(
         self, source_text: str, query_kind: str, payload: dict[str, Any]
     ) -> None:
         key = self.stable_key(query_kind, source_text.casefold())
+        row = self._connection().execute("SELECT * FROM learning_items WHERE item_key = ?", (key,)).fetchone()
+        if row:
+            previous = self._learning_item(row).payload
+            if isinstance(previous.get("pdf_source"), dict):
+                payload = dict(payload)
+                payload.setdefault("pdf_source", previous["pdf_source"])
+                note = dict(payload.get("ai_note") or {})
+                if not note.get("examples"):
+                    note["examples"] = previous.get("ai_note", {}).get("examples", [])
+                    payload["ai_note"] = note
         self._connection().execute(
             "UPDATE learning_items SET payload = ?, updated_at = ? WHERE item_key = ?",
             (json.dumps(payload, ensure_ascii=False), int(time.time()), key),
