@@ -34,6 +34,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "window_hotkey": "alt+q",
     "pdf_highlight_hotkey": "ctrl+h",
     "pdf_remove_highlight_hotkey": "ctrl+r",
+    "pdf_question_hotkey": "alt+a",
+    "pdf_question_answer_style": "",
     "review_reminders": True,
     "last_review_notice_date": "",
     "appearance": {"theme": "sakura"},
@@ -197,6 +199,8 @@ class SettingsStore:
     def _normalize(self) -> None:
         if not isinstance(self._data.get("models"), list):
             self._data["models"] = []
+        if not isinstance(self._data.get("pdf_question_answer_style"), str):
+            self._data["pdf_question_answer_style"] = ""
         appearance = self._data.get("appearance")
         theme = appearance.get("theme") if isinstance(appearance, dict) else None
         self._data["appearance"] = {

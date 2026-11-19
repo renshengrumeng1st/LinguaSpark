@@ -339,16 +339,29 @@ def test_saved_highlight_matches_selected_text_after_zoom(qtbot, tmp_path):
             # Recreate the same text range after PDF.js has rebuilt its text layer.
             errors = json.loads(_run_javascript(qtbot, view, """
                 (() => {
-                    const range = SELECT_TEXT;
-                    const rects = [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
-                    const marks = [...document.querySelectorAll('.linguaspark-annotation')];
+                    SELECT_TEXT;
+                    const spans = [...document.querySelectorAll('.page .textLayer span')]
+                        .filter(span => span.textContent.trim()).slice(0, 3);
+                    // The selected fixture spans exactly three physical lines.
+                    // Compare each line's selected glyph extent, independently
+                    // of duplicate DOM rectangles now merged before painting.
+                    const rects = spans.map((span, index) => {
+                        const line = document.createRange();
+                        line.selectNodeContents(span);
+                        if (index === 0) line.setStart(span.firstChild, 3);
+                        if (index === 2) line.setEnd(span.firstChild, 8);
+                        return line.getBoundingClientRect();
+                    });
+                    const marks = [...document.querySelectorAll('.linguaspark-annotation')]
+                        .sort((a,b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                    if (marks.length !== 3) return JSON.stringify({count:marks.length});
                     return JSON.stringify(rects.map((rect, i) => {
                         const mark = marks[i].getBoundingClientRect();
                         return ['left', 'top', 'width', 'height'].map(key => mark[key] - rect[key]);
                     }));
                 })()
             """.replace("SELECT_TEXT", select_text)))
-            assert len(errors) >= 3
+            assert len(errors) == 3
             for offsets in errors:
                 # Text-layer font rounding can change the glyph box by a pixel
                 # between renders; the old page-border error is 9+ pixels.

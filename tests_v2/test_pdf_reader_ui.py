@@ -135,7 +135,7 @@ def test_translation_partial_is_visible_before_phrase_analysis(
 
     controller.translation_started.emit("A selected sentence.")
     controller.translation_partial.emit("快速译文")
-    assert tab.translation.toPlainText() == "快速译文"
+    qtbot.waitUntil(lambda: "快速译文" in tab.translation.toPlainText())
     assert tab.phrase_panel.isHidden()
 
     controller.phrase_ready.emit(PdfPhrase("selected sentence", "选中的句子"))
@@ -155,23 +155,12 @@ def test_cached_completion_populates_translation_and_phrases(
 
     controller.translation_completed.emit(result, True)
 
-    assert tab.translation.toPlainText() == "缓存译文"
+    assert "缓存译文" in tab.translation.toPlainText()
     assert "in context" in [label.text() for label in tab.phrase_list.findChildren(QLabel)]
     assert "缓存" in tab.status.text()
 
 
-def test_selection_actions_route_and_copy(qtbot, tmp_path: Path, monkeypatch) -> None:
-    class TestClipboard:
-        value = ""
-
-        def setText(self, value: str) -> None:
-            self.value = value
-
-        def text(self) -> str:
-            return self.value
-
-    clipboard = TestClipboard()
-    monkeypatch.setattr(QApplication, "clipboard", lambda: clipboard)
+def test_selection_actions_route(qtbot, tmp_path: Path) -> None:
     controller = FakePdfController()
     tab = PdfReaderTab(controller, _settings(tmp_path))
     qtbot.addWidget(tab)
@@ -183,13 +172,12 @@ def test_selection_actions_route_and_copy(qtbot, tmp_path: Path, monkeypatch) ->
     tab.highlight_combo.setCurrentIndex(tab.highlight_combo.findData("green"))
     tab.highlight_button.click()
     tab.remove_highlight_button.click()
-    controller.translation_partial.emit("可复制译文")
-    tab.copy_button.click()
+    controller.translation_partial.emit("流式译文")
 
     assert controller.translate_calls == 1
     assert controller.highlight_colors == ["green"]
     assert controller.delete_calls == 1
-    assert tab.clipboard_text() == "可复制译文"
+    qtbot.waitUntil(lambda: "流式译文" in tab.translation.toPlainText())
 
 
 def test_removing_a_mark_clears_the_native_selection_and_disables_actions(

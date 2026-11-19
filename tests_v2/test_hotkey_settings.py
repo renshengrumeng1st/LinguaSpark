@@ -20,6 +20,7 @@ def test_hotkey_pair_validation():
         "selection_hotkey": "Alt+F2",
         "pdf_highlight_hotkey": "Ctrl+H",
         "pdf_remove_highlight_hotkey": "Ctrl+R",
+        "pdf_question_hotkey": "Alt+A",
     }
     with pytest.raises(ValueError, match="相同"):
         SettingsDialog._validated_hotkeys("Alt+Q", "alt-q")
@@ -46,12 +47,15 @@ def test_pdf_hotkeys_save_reload_and_restore_defaults(qtbot, tmp_path):
     qtbot.addWidget(dialog)
     assert dialog.pdf_highlight_hotkey.text() == "Ctrl+H"
     assert dialog.pdf_remove_highlight_hotkey.text() == "Ctrl+R"
+    assert dialog.pdf_question_hotkey.text() == "Alt+A"
     qtbot.keyClick(dialog.pdf_highlight_hotkey, Qt.Key_K, Qt.ControlModifier)
     qtbot.keyClick(dialog.pdf_remove_highlight_hotkey, Qt.Key_M, Qt.ControlModifier)
+    qtbot.keyClick(dialog.pdf_question_hotkey, Qt.Key_A, Qt.ControlModifier | Qt.ShiftModifier)
     dialog._save_hotkeys()
     reopened = SettingsStore(settings.path, settings.secrets, settings.legacy_path)
     assert reopened.get("pdf_highlight_hotkey") == "Ctrl+K"
     assert reopened.get("pdf_remove_highlight_hotkey") == "Ctrl+M"
+    assert reopened.get("pdf_question_hotkey") == "Ctrl+Shift+A"
     next_dialog = SettingsDialog(reopened, autostart=ReadOnlyAutostart())
     qtbot.addWidget(next_dialog)
     assert next_dialog.pdf_highlight_hotkey.text() == "Ctrl+K"
@@ -61,3 +65,10 @@ def test_pdf_hotkeys_save_reload_and_restore_defaults(qtbot, tmp_path):
     reopened.load()
     assert reopened.get("pdf_highlight_hotkey") == "Ctrl+H"
     assert reopened.get("pdf_remove_highlight_hotkey") == "Ctrl+R"
+    assert reopened.get("pdf_question_hotkey") == "Alt+A"
+
+
+@pytest.mark.parametrize("question", ["Alt+Q", "Alt+W", "Ctrl+H", "Ctrl+R"])
+def test_question_hotkey_rejects_other_action_bindings(question):
+    with pytest.raises(ValueError, match="相同"):
+        SettingsDialog._validated_hotkeys("Alt+Q", "Alt+W", question=question)

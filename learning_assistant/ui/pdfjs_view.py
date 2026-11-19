@@ -6,13 +6,13 @@ import json
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QFile, QIODevice, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QResizeEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QFile, QIODevice, QPointF, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QColor, QMouseEvent, QResizeEvent, QWheelEvent
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from learning_assistant.core.paths import project_root
 from learning_assistant.domain.pdf_models import PdfAnnotation, PdfTextSelection
@@ -46,6 +46,9 @@ _READER_HOOK = r"""
         let requestedPage = null;
         let keepSelectionForActions = false;
         let hasCommittedSelection = false;
+        let selectionSignature = null;
+        let citation = null;
+        let citationTimer = null;
 
         const style = document.createElement("link");
         style.rel = "stylesheet";
@@ -65,24 +68,6 @@ _READER_HOOK = r"""
         function pageScale(pageIndex) {
             const view = application()?.pdfViewer?.getPageView(pageIndex);
             return Number(view?.viewport?.scale || application()?.pdfViewer?.currentScale || 1);
-        }
-
-        function pageForRect(rect) {
-            let best = null;
-            let bestArea = 0;
-            for (const page of document.querySelectorAll(".pdfViewer .page")) {
-                const bounds = page.getBoundingClientRect();
-                const width = Math.max(0,
-                    Math.min(rect.right, bounds.right) - Math.max(rect.left, bounds.left));
-                const height = Math.max(0,
-                    Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top));
-                const area = width * height;
-                if (area > bestArea) {
-                    best = {element: page, bounds};
-                    bestArea = area;
-                }
-            }
-            return best;
         }
 
         function indicesForRange(pageIndex, range) {
@@ -106,6 +91,7 @@ _READER_HOOK = r"""
                 if (keepSelectionForActions)
                     return;
                 hasCommittedSelection = false;
+                selectionSignature = null;
                 const page = event?.target?.closest?.(".pdfViewer .page") || null;
                 if (page) {
                     const layer = page.querySelector(".textLayer");
@@ -120,27 +106,45 @@ _READER_HOOK = r"""
             hasCommittedSelection = true;
             const pages = new Set();
             const rects = [];
+            const geometry = new Map();
             for (let index = 0; index < selection.rangeCount; index += 1) {
                 const range = selection.getRangeAt(index);
-                for (const rect of range.getClientRects()) {
-                    if (rect.width <= 0 || rect.height <= 0)
+                const ancestor = range.commonAncestorContainer;
+                const root = ancestor.nodeType === Node.TEXT_NODE ? ancestor.parentNode : ancestor;
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                while (walker.nextNode()) {
+                    const node = walker.currentNode;
+                    const parent = node.parentElement;
+                    // PDF.js moves a large endOfContent helper during dragging.
+                    // Only glyph ranges belong in a saved highlight.
+                    if (!node.length || !parent?.closest('.textLayer')
+                            || parent.closest('.endOfContent') || !range.intersectsNode(node))
                         continue;
-                    const page = pageForRect(rect);
+                    const page = parent.closest('.pdfViewer .page');
                     if (!page)
                         continue;
-                    const pageIndex = Number(page.element.dataset.pageNumber) - 1;
+                    const pageIndex = Number(page.dataset.pageNumber) - 1;
                     if (!Number.isInteger(pageIndex) || pageIndex < 0)
                         continue;
-                    const scale = pageScale(pageIndex);
-                    pages.add(pageIndex);
-                    rects.push({
-                        page: pageIndex,
-                        // Absolute annotation children start inside the page border.
-                        x: (rect.left - page.bounds.left - page.element.clientLeft) / scale,
-                        y: (rect.top - page.bounds.top - page.element.clientTop) / scale,
-                        width: rect.width / scale,
-                        height: rect.height / scale,
-                    });
+                    const glyphs = document.createRange();
+                    glyphs.setStart(node, node === range.startContainer ? range.startOffset : 0);
+                    glyphs.setEnd(node, node === range.endContainer ? range.endOffset : node.length);
+                    for (const rect of glyphs.getClientRects()) {
+                        if (rect.width <= 0 || rect.height <= 0)
+                            continue;
+                        if (!geometry.has(pageIndex))
+                            geometry.set(pageIndex, {bounds: page.getBoundingClientRect(), scale: pageScale(pageIndex)});
+                        const {bounds, scale} = geometry.get(pageIndex);
+                        pages.add(pageIndex);
+                        rects.push({
+                            page: pageIndex,
+                            // Absolute annotation children start inside the page border.
+                            x: (rect.left - bounds.left - page.clientLeft) / scale,
+                            y: (rect.top - bounds.top - page.clientTop) / scale,
+                            width: rect.width / scale,
+                            height: rect.height / scale,
+                        });
+                    }
                 }
             }
             const pageList = [...pages];
@@ -148,6 +152,10 @@ _READER_HOOK = r"""
             const indices = pageList.length === 1
                 ? indicesForRange(page, selection.getRangeAt(0))
                 : {start: -1, end: -1};
+            const signature = JSON.stringify([text, pageList, indices.start, indices.end]);
+            if (signature === selectionSignature)
+                return;
+            selectionSignature = signature;
             bridge.commit(JSON.stringify({
                 text,
                 pages: pageList,
@@ -156,6 +164,41 @@ _READER_HOOK = r"""
                 end: indices.end,
                 rects,
             }));
+        }
+
+        function mergedHighlightRects(raw) {
+            const rects = raw.map(rect => ({left: rect.left, top: rect.top,
+                right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height}))
+                .filter(rect => Object.values(rect).every(Number.isFinite) && rect.width > 0 && rect.height > 0);
+            const parent = rects.map((_, index) => index);
+            const root = index => {
+                while (parent[index] !== index) index = parent[index];
+                return index;
+            };
+            // Join actual neighboring glyphs, including subscripts, before
+            // painting. Separate lines and distant columns stay separate.
+            for (let first = 0; first < rects.length; first++) {
+                for (let second = first + 1; second < rects.length; second++) {
+                    const a = rects[first], b = rects[second];
+                    const xOverlap = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+                    const yOverlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+                    const smallHeight = Math.min(a.height, b.height);
+                    const sameLine = yOverlap >= smallHeight * 0.3 && -xOverlap <= Math.max(2, smallHeight * 0.3);
+                    const script = -yOverlap <= Math.max(1, smallHeight * 0.2)
+                        && xOverlap >= Math.min(a.width, b.width) * 0.15
+                        && Math.abs((a.top + a.bottom - b.top - b.bottom) / 2) <= Math.max(a.height, b.height) * 0.9;
+                    if (sameLine || script) parent[root(second)] = root(first);
+                }
+            }
+            const groups = new Map();
+            rects.forEach((rect, index) => {
+                const id = root(index), previous = groups.get(id);
+                groups.set(id, previous ? {left: Math.min(previous.left, rect.left), top: Math.min(previous.top, rect.top),
+                    right: Math.max(previous.right, rect.right), bottom: Math.max(previous.bottom, rect.bottom)} : rect);
+            });
+            return [...groups.values()].map(rect => ({left:rect.left, top:rect.top, right:rect.right,
+                bottom:rect.bottom, width:rect.right - rect.left, height:rect.bottom - rect.top}))
+                .sort((a, b) => a.top - b.top || a.left - b.left);
         }
 
         function renderPageAnnotations(pageIndex) {
@@ -170,16 +213,18 @@ _READER_HOOK = r"""
             const layer = document.createElement("div");
             layer.className = "linguaspark-annotation-layer";
             for (const item of items) {
-                for (const bounds of item.bounds || []) {
+                const rects = (item.bounds || []).map(bounds => {
                     const [x, y, width, height] = bounds.map(Number);
-                    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0)
-                        continue;
+                    return {left:x * scale, top:y * scale, right:(x + width) * scale,
+                        bottom:(y + height) * scale, width:width * scale, height:height * scale};
+                });
+                for (const rect of mergedHighlightRects(rects)) {
                     const mark = document.createElement("div");
                     mark.className = "linguaspark-annotation";
-                    mark.style.left = `${x * scale}px`;
-                    mark.style.top = `${y * scale}px`;
-                    mark.style.width = `${width * scale}px`;
-                    mark.style.height = `${height * scale}px`;
+                    mark.style.left = `${rect.left}px`;
+                    mark.style.top = `${rect.top}px`;
+                    mark.style.width = `${rect.width}px`;
+                    mark.style.height = `${rect.height}px`;
                     mark.style.backgroundColor = item.color;
                     layer.appendChild(mark);
                 }
@@ -192,6 +237,135 @@ _READER_HOOK = r"""
                 const index = Number(page.dataset.pageNumber) - 1;
                 if (Number.isInteger(index) && index >= 0)
                     renderPageAnnotations(index);
+            }
+        }
+
+        function clearCitation() {
+            if (!citation)
+                return;
+            citation = null;
+            clearTimeout(citationTimer);
+            document.querySelectorAll('.linguaspark-citation-layer').forEach(item => item.remove());
+            document.querySelectorAll('.linguaspark-citation-page').forEach(item =>
+                item.classList.remove('linguaspark-citation-page'));
+        }
+
+        function normalizedCitationText(text) {
+            return text.normalize('NFKC').toLowerCase()
+                .replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[\u201c\u201d]/g, '"')
+                .replace(/[\u2010-\u2015]/g, '-').replace(/[\s\u00ad\u200b]/gu, '');
+        }
+
+        function citationRange(layer, quote) {
+            const trimmed = quote.trim();
+            const wrappers = {'"':'"', "'":"'", '\u201c':'\u201d', '\u2018':'\u2019', '`':'`'};
+            const unwrapped = wrappers[trimmed[0]] === trimmed[trimmed.length - 1]
+                ? trimmed.slice(1, -1).trim() : trimmed;
+            const needles = [...new Set([quote, unwrapped].map(normalizedCitationText))].filter(text => text.length >= 4);
+            if (!needles.length)
+                return null;
+            const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT);
+            let text = '';
+            const positions = [];
+            while (walker.nextNode()) {
+                const node = walker.currentNode;
+                let offset = 0;
+                for (const character of node.nodeValue) {
+                    const normalized = normalizedCitationText(character);
+                    text += normalized;
+                    for (let index = 0; index < normalized.length; index += 1)
+                        positions.push({node, start: offset, end: offset + character.length});
+                    offset += character.length;
+                }
+            }
+            function locate(value, mapping) {
+                for (const needle of needles) {
+                    const start = value.indexOf(needle);
+                    // Do not guess between repeated occurrences.
+                    if (start < 0 || value.indexOf(needle, start + 1) >= 0)
+                        continue;
+                    const first = mapping[start], last = mapping[start + needle.length - 1];
+                    const range = document.createRange();
+                    range.setStart(first.node, first.start);
+                    range.setEnd(last.node, last.end);
+                    return range;
+                }
+                return null;
+            }
+            const exact = locate(text, positions);
+            if (exact)
+                return exact;
+            // PDF prose may split a word across lines using a visible hyphen.
+            // Remove only trailing prose hyphens, not mathematical minus signs
+            // or hyphens within the same line, and retain glyph offset mapping.
+            let joined = '';
+            const joinedPositions = [];
+            positions.forEach((position, index) => {
+                const next = positions[index + 1];
+                if (text[index] === '-' && next && next.node !== position.node
+                        && /[a-z]{2}-\s*$/i.test(position.node.nodeValue)
+                        && /^\s*[a-z]{2}/.test(next.node.nodeValue)) {
+                    const a = position.node.parentElement.getBoundingClientRect();
+                    const b = next.node.parentElement.getBoundingClientRect();
+                    if (b.top > a.top + Math.min(a.height, b.height) * 0.5 && b.left < a.right)
+                        return;
+                }
+                joined += text[index];
+                joinedPositions.push(position);
+            });
+            return locate(joined, joinedPositions);
+        }
+
+        function citationScroll(target, rect) {
+            const container = document.querySelector('#viewerContainer');
+            if (!container)
+                return;
+            const viewport = container.getBoundingClientRect();
+            const top = viewport.top + container.clientTop + 16;
+            const bottom = viewport.top + container.clientTop + container.clientHeight - 16;
+            // Only reveal vertically when needed; never pan the document or
+            // move a passage that is already visible in the reading viewport.
+            if (rect.top < top)
+                container.scrollTop += rect.top - top;
+            else if (rect.bottom > bottom)
+                container.scrollTop += rect.bottom - bottom;
+            container.scrollLeft = target.scrollLeft;
+        }
+
+        function renderCitation() {
+            const target = citation;
+            if (!target)
+                return;
+            const page = pageElement(target.page);
+            if (!page)
+                return;
+            page.querySelectorAll('.linguaspark-citation-layer').forEach(item => item.remove());
+            const textLayer = page.querySelector('.textLayer');
+            const range = textLayer && target.quote ? citationRange(textLayer, target.quote) : null;
+            const rects = range ? mergedHighlightRects([...range.getClientRects()]) : [];
+            if (!rects.length) {
+                page.classList.add('linguaspark-citation-page');
+                return;
+            }
+            page.classList.remove('linguaspark-citation-page');
+            const bounds = page.getBoundingClientRect();
+            const layer = document.createElement('div');
+            layer.className = 'linguaspark-citation-layer';
+            for (const rect of rects) {
+                const mark = document.createElement('div');
+                mark.className = 'linguaspark-citation';
+                mark.style.left = `${rect.left - bounds.left - page.clientLeft}px`;
+                mark.style.top = `${rect.top - bounds.top - page.clientTop}px`;
+                mark.style.width = `${rect.width}px`;
+                mark.style.height = `${rect.height}px`;
+                layer.appendChild(mark);
+            }
+            page.appendChild(layer);
+            if (!target.positioned) {
+                target.positioned = true;
+                citationScroll(target, rects[0]);
+                clearTimeout(citationTimer);
+                citationTimer = setTimeout(() => { if (citation === target) clearCitation(); }, 4000);
             }
         }
 
@@ -240,6 +414,7 @@ _READER_HOOK = r"""
                 }));
             },
             goToPage(pageIndex) {
+                clearCitation();
                 const app = application();
                 const count = Number(app?.pdfDocument?.numPages || 0);
                 requestedPage = Math.max(0, Math.trunc(Number(pageIndex)));
@@ -247,16 +422,40 @@ _READER_HOOK = r"""
                     app.pdfViewer.scrollPageIntoView({pageNumber: Math.min(requestedPage + 1, count)});
                 }
             },
+            revealCitation(pageIndex, quote) {
+                clearCitation();
+                requestedPage = pageIndex;
+                const container = document.querySelector('#viewerContainer');
+                const target = citation = {page: pageIndex, quote, positioned: false, scrollLeft:container?.scrollLeft || 0};
+                const page = pageElement(pageIndex);
+                if (container && page) {
+                    const viewport = container.getBoundingClientRect();
+                    const bounds = page.getBoundingClientRect();
+                    if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom) {
+                        container.scrollTop += bounds.top - viewport.top - container.clientTop;
+                        container.scrollLeft = target.scrollLeft;
+                    }
+                }
+                application()?.pdfViewer?.update();
+                // Allow a lazy target page to finish its text layer before
+                // starting the four-second passage highlight lifetime.
+                citationTimer = setTimeout(() => { if (citation === target) clearCitation(); }, 12000);
+                renderCitation();
+            },
             renderAnnotations,
         };
 
         window.addEventListener("blur", () => {
+            // Focus may leave before Chromium receives mouseup.
+            reportSelection();
             // Remove the browser's blue highlight immediately when the user
             // moves to Qt controls, but retain the committed text for actions.
             keepSelectionForActions = true;
             window.getSelection()?.removeAllRanges();
         });
         document.addEventListener("pointerdown", event => {
+            if (event.target?.closest?.('#viewerContainer'))
+                clearCitation();
             if (event.button !== 0)
                 return;
             keepSelectionForActions = false;
@@ -267,8 +466,14 @@ _READER_HOOK = r"""
             const selection = window.getSelection();
             if (hasCommittedSelection && !keepSelectionForActions && (!selection || selection.isCollapsed)) {
                 hasCommittedSelection = false;
+                selectionSignature = null;
                 bridge.commit(JSON.stringify({text: "", pages: [], rects: []}));
             }
+        });
+        document.addEventListener('wheel', clearCitation, {passive: true});
+        document.addEventListener('keydown', event => {
+            if (['PageDown','PageUp','Home','End','ArrowDown','ArrowUp','ArrowLeft','ArrowRight'].includes(event.key))
+                clearCitation();
         });
 
         document.addEventListener(
@@ -313,7 +518,9 @@ _READER_HOOK = r"""
             });
             app.eventBus.on("pagerendered", event => {
                 renderPageAnnotations(Math.max(0, Number(event.pageNumber || 1) - 1));
+                renderCitation();
             });
+            app.eventBus.on('textlayerrendered', renderCitation);
             app.eventBus.on("documenterror", event => {
                 bridge.failed(String(event?.message || event?.reason?.message || "PDF document failed to load"));
             });
@@ -375,6 +582,7 @@ class PdfJsViewAdapter(QWebEngineView):
         page = _ReaderPage(self)
         page.console_message.connect(self.console_message)
         self.setPage(page)
+        self.settings().setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
         self._asset_root = Path(asset_root)
         self._server: PdfJsAssetServer | None = None
         self._path: Path | None = None
@@ -387,6 +595,7 @@ class PdfJsViewAdapter(QWebEngineView):
         self._ready = False
         self._pending_page: int | None = None
         self._page_count = 0
+        self._selection_drag_active = False
         self._viewport_generation = 0
         self._viewport_preview = QLabel(self)
         self._viewport_preview.setScaledContents(True)
@@ -419,6 +628,7 @@ class PdfJsViewAdapter(QWebEngineView):
         injection.setSourceCode(_web_channel_source() + "\n" + _READER_HOOK)
         self.page().scripts().insert(injection)
         self.loadFinished.connect(self._load_finished)
+        QApplication.instance().installEventFilter(self)
 
     @property
     def document_key(self) -> str:
@@ -465,6 +675,7 @@ class PdfJsViewAdapter(QWebEngineView):
         return True
 
     def close_document(self) -> None:
+        self._selection_drag_active = False
         self._viewport_timer.stop()
         self._viewport_generation += 1
         self._viewport_preview.hide()
@@ -559,6 +770,14 @@ class PdfJsViewAdapter(QWebEngineView):
             self._pending_page = None
         return True
 
+    def reveal_citation(self, page_index: int, quote: str = "") -> bool:
+        """Reveal a cited passage without changing selection or saved marks."""
+        if (not self._ready or not isinstance(page_index, int) or isinstance(page_index, bool)
+                or not 0 <= page_index < self._page_count or not isinstance(quote, str) or len(quote) > 500):
+            return False
+        self._run_reader(f"linguaReader.revealCitation({page_index}, {json.dumps(quote)});")
+        return True
+
     def _adjust_zoom_from_wheel(
         self,
         delta: int,
@@ -574,6 +793,40 @@ class PdfJsViewAdapter(QWebEngineView):
             event.accept()
             return
         super().wheelEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        kind = event.type()
+        if kind not in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                        QEvent.Type.MouseMove, QEvent.Type.Wheel):
+            return super().eventFilter(watched, event)
+        in_view = isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched))
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if in_view:
+                self._selection_drag_active = True
+        elif self._selection_drag_active:
+            if kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                self._selection_drag_active = False
+                if not in_view:
+                    self._finish_selection_drag(event)
+            elif (in_view and kind in (QEvent.Type.MouseMove, QEvent.Type.Wheel)
+                  and not event.buttons() & Qt.MouseButton.LeftButton):
+                self._selection_drag_active = False
+                self._finish_selection_drag(event)
+        return super().eventFilter(watched, event)
+
+    def _finish_selection_drag(self, event) -> None:
+        # A release delivered to another Qt widget never reaches Blink. Send a
+        # native release too: a JavaScript mouseup cannot stop its autoscroll.
+        target = self.focusProxy() or self
+        point = target.mapFromGlobal(event.globalPosition().toPoint())
+        point.setX(max(1, min(target.width() - 2, point.x())))
+        point.setY(max(1, min(target.height() - 2, point.y())))
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease, QPointF(point),
+            QPointF(target.mapToGlobal(point)), Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton, event.modifiers(),
+        )
+        QApplication.sendEvent(target, release)
 
     def begin_viewport_transition(self) -> None:
         """Keep a complete frame visible while the native PDF viewport resizes."""

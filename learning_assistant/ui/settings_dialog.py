@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QFrame, QListWidget, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
+    QFrame, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -106,7 +106,7 @@ class SettingsDialog(QDialog):
         side.addSpacing(16)
         self.navigation = QListWidget()
         self.navigation.setObjectName("settingsNavigation")
-        self.navigation.addItems(["常规设置", "AI 模型", "外观与风格", "学习与发音", "快捷键"])
+        self.navigation.addItems(["常规设置", "AI 模型", "外观与风格", "学习与发音", "快捷键", "PDF 问答"])
         side.addWidget(self.navigation, 1)
         side_note = QLabel("本机保存偏好\n让每次学习更顺手")
         side_note.setObjectName("muted")
@@ -136,10 +136,11 @@ class SettingsDialog(QDialog):
             ("外观与风格", "喜欢星光、夜色还是自然？这里都可以找到。"),
             ("学习与发音", "选择学习语言、发音方式和适合自己的学习节奏。"),
             ("快捷键", "设置窗口、划词翻译与 PDF 标记的常用按键。"),
+            ("PDF 问答", "设置问答助手的语气、回答结构和详细程度。"),
         ]
         for page, card in ((self._general_tab(), True), (self.model_page, False),
                            (self.appearance_page, False), (self._learning_tab(), True),
-                           (self._hotkeys_tab(), True)):
+                           (self._hotkeys_tab(), True), (self._pdf_question_tab(), True)):
             self.pages.addWidget(self._scroll_page(page, card))
         root.addWidget(self.pages, 1)
         footer = QHBoxLayout()
@@ -181,6 +182,53 @@ class SettingsDialog(QDialog):
             self.pages.setCurrentIndex(index)
             self.page_title.setText(self._page_titles[index][0])
             self.page_subtitle.setText(self._page_titles[index][1])
+
+    def _pdf_question_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        label = QLabel("回答风格提示词")
+        root.addWidget(label)
+        self.pdf_answer_style = QPlainTextEdit()
+        label.setBuddy(self.pdf_answer_style)
+        self.pdf_answer_style.setAccessibleName("PDF 问答回答风格提示词")
+        self.pdf_answer_style.setTabChangesFocus(True)
+        self.pdf_answer_style.setPlaceholderText(
+            "例如：先用一句话给出结论，再分步骤解释。使用适合初学者的语言，必要时举例。"
+        )
+        self.pdf_answer_style.setPlainText(self.settings.get("pdf_question_answer_style", ""))
+        self.pdf_answer_style.setMinimumHeight(200)
+        root.addWidget(self.pdf_answer_style, 1)
+        hint = QLabel("留空使用默认风格。保存后从下一次提问起生效，适用于所有 PDF；原文引用、公式和证据规则仍保留。")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+        self.pdf_question_settings_status = QLabel("")
+        self.pdf_question_settings_status.setObjectName("muted")
+        root.addWidget(self.pdf_question_settings_status)
+        actions = QHBoxLayout()
+        self.reset_pdf_question_button = QPushButton("恢复默认")
+        self.reset_pdf_question_button.clicked.connect(self._reset_pdf_question_style)
+        actions.addWidget(self.reset_pdf_question_button)
+        actions.addStretch(1)
+        self.save_pdf_question_button = QPushButton("保存问答设置")
+        self.save_pdf_question_button.setObjectName("primary")
+        self.save_pdf_question_button.clicked.connect(self._save_pdf_question_style)
+        actions.addWidget(self.save_pdf_question_button)
+        root.addLayout(actions)
+        self.pdf_answer_style.textChanged.connect(
+            lambda: self.pdf_question_settings_status.setText("尚未保存")
+        )
+        return page
+
+    def _reset_pdf_question_style(self) -> None:
+        self.pdf_answer_style.clear()
+        self.pdf_question_settings_status.setText("已恢复默认风格，保存后生效。")
+
+    def _save_pdf_question_style(self) -> None:
+        self.settings.set("pdf_question_answer_style", self.pdf_answer_style.toPlainText().strip())
+        self.settings.save()
+        self.pdf_question_settings_status.setText("已保存，从下一次提问起生效。")
+        self.settings_changed.emit()
 
 
     def _general_tab(self) -> QWidget:
@@ -246,15 +294,17 @@ class SettingsDialog(QDialog):
         self.pdf_remove_highlight_hotkey = HotkeyEdit(
             str(self.settings.get("pdf_remove_highlight_hotkey", "Ctrl+R"))
         )
+        self.pdf_question_hotkey = HotkeyEdit(str(self.settings.get("pdf_question_hotkey", "Alt+A")))
         form.addRow("显示/隐藏窗口", self.window_hotkey)
         form.addRow("翻译选中文字", self.selection_hotkey)
         form.addRow("PDF 标记", self.pdf_highlight_hotkey)
         form.addRow("PDF 移除标记", self.pdf_remove_highlight_hotkey)
+        form.addRow("PDF 问答浮窗", self.pdf_question_hotkey)
         root.addLayout(form)
         hint = QLabel(
             "点击输入框后，直接按下想使用的组合键。建议至少包含 Ctrl、Alt、Shift 或 Win，"
             "避免覆盖普通按键。打开设置期间，全局快捷键会暂时停用。"
-            "PDF 标记快捷键仅在当前 PDF 标签中生效。"
+            "PDF 标记及问答快捷键仅在当前 PDF 阅读器中生效。"
         )
         hint.setObjectName("muted")
         hint.setWordWrap(True)
@@ -281,17 +331,19 @@ class SettingsDialog(QDialog):
         self.selection_hotkey.setText("Alt+W")
         self.pdf_highlight_hotkey.setText("Ctrl+H")
         self.pdf_remove_highlight_hotkey.setText("Ctrl+R")
+        self.pdf_question_hotkey.setText("Alt+A")
 
     @staticmethod
     def _validated_hotkeys(
         window: str, selection: str,
-        highlight: str = "Ctrl+H", remove_highlight: str = "Ctrl+R",
+        highlight: str = "Ctrl+H", remove_highlight: str = "Ctrl+R", question: str = "Alt+A",
     ) -> dict[str, str]:
         values = {
             "window_hotkey": window.strip(),
             "selection_hotkey": selection.strip(),
             "pdf_highlight_hotkey": highlight.strip(),
             "pdf_remove_highlight_hotkey": remove_highlight.strip(),
+            "pdf_question_hotkey": question.strip(),
         }
         if not all(values.values()):
             raise ValueError("快捷键都不能为空。")
@@ -318,6 +370,7 @@ class SettingsDialog(QDialog):
             values = self._validated_hotkeys(
                 self.window_hotkey.text(), self.selection_hotkey.text(),
                 self.pdf_highlight_hotkey.text(), self.pdf_remove_highlight_hotkey.text(),
+                self.pdf_question_hotkey.text(),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "快捷键不可用", str(exc))

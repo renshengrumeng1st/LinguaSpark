@@ -16,8 +16,10 @@ def reader(qtbot, tmp_path):
     _write_three_line_pdf(document)
     window = PdfReaderWindow(_settings(tmp_path), FakePdfController)
     qtbot.addWidget(window)
-    window.show()
-    window.activateWindow()
+    with qtbot.waitActive(window):
+        window.show()
+        window.activateWindow()
+    qtbot.waitUntil(window.isActiveWindow)
     assert window.open_file(document)
     tab = window.current_tab()
     view = tab.pdf_view
@@ -56,6 +58,38 @@ def _assert_no_black_frame(view):
     assert colors
     # The fixture has three lines on pale paper, never a large dark region.
     assert sum(max(c.red(), c.green(), c.blue()) < 30 for c in colors) / len(colors) < 0.2
+
+
+def test_overlapping_pdf_canvases_keep_the_same_paper_tint(reader, qtbot):
+    _, _, view = reader
+    points = json.loads(_run_javascript(qtbot, view, """
+        (() => {
+            // Simulate an opaque detail canvas over one half of the base canvas.
+            const wrapper = document.querySelector('.page .canvasWrapper');
+            for (const width of [120, 60]) {
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = 30;
+                Object.assign(canvas.style, {width: width + 'px', height: '30px'});
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#c0c0c0';
+                ctx.fillRect(0, 0, width, 30);
+                wrapper.appendChild(canvas);
+            }
+            const {left, top} = wrapper.getBoundingClientRect();
+            return JSON.stringify([left + 30, left + 90, top + 15]);
+        })()
+    """))
+    stack_x, base_x, y = map(round, points)
+
+    def rgb(x):
+        color = view.grab(QRect(x, y, 1, 1)).toImage().pixelColor(0, 0)
+        return color.red(), color.green(), color.blue()
+
+    # Neutral gray multiplied once by the default eye-care paper color.
+    tint = (176, 184, 170)
+    qtbot.waitUntil(lambda: rgb(base_x) == pytest.approx(tint, abs=2), timeout=2000)
+    assert rgb(stack_x) == pytest.approx(tint, abs=2)
 
 
 def test_clicking_sidebar_removes_visual_selection_but_keeps_actions(reader, qtbot):

@@ -31,7 +31,8 @@ body,
     background-color: var(--linguaspark-paper) !important;
 }
 
-.pdfViewer .page canvas {
+/* Composite the base and detail canvases before tinting the page. */
+.pdfViewer .page > .canvasWrapper {
     mix-blend-mode: multiply;
 }
 
@@ -59,4 +60,24 @@ body,
     position: absolute;
     pointer-events: none;
     border-radius: 2px;
+}
+
+.linguaspark-citation-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 5;
+}
+
+.linguaspark-citation {
+    position: absolute;
+    pointer-events: none;
+    border-radius: 2px;
+    background: rgba(255, 191, 38, 0.48);
+    outline: 1px solid rgba(204, 138, 0, 0.65);
+}
+
+.pdfViewer .page.linguaspark-citation-page {
+    outline: 3px solid rgba(224, 162, 27, 0.8);
+    outline-offset: -3px;
 }

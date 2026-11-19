@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import (
-    QByteArray, QBuffer, QEasingCurve, QFileInfo, QIODevice, QPropertyAnimation,
+    QEasingCurve, QPropertyAnimation,
     QSize, Qt, QTimer, Signal,
 )
-from PySide6.QtGui import QCloseEvent, QImage, QImageReader, QKeyEvent, QPainter, QPixmap, QShortcut, QKeySequence
+from PySide6.QtGui import QCloseEvent, QPixmap, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton,
+    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -25,65 +25,7 @@ from learning_assistant.ui.library_dialog import LibraryDialog
 from learning_assistant.ui.theme_illustration import ThemeIllustration
 
 
-class InputEdit(QPlainTextEdit):
-    submit_requested = Signal()
-    image_pasted = Signal(bytes)
-    image_rejected = Signal(str)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() & Qt.ControlModifier:
-            self.submit_requested.emit()
-            return
-        super().keyPressEvent(event)
-
-    @staticmethod
-    def _image_file(source) -> str:
-        urls = source.urls()
-        if len(urls) != 1 or not urls[0].isLocalFile():
-            return ""
-        path = urls[0].toLocalFile()
-        formats = {bytes(value).decode("ascii") for value in QImageReader.supportedImageFormats()}
-        if QFileInfo(path).suffix().casefold() in formats or QImageReader(path).canRead():
-            return path
-        return ""
-
-    def canInsertFromMimeData(self, source) -> bool:
-        if self.isReadOnly():
-            return False
-        return bool(source.hasImage() or self._image_file(source) or super().canInsertFromMimeData(source))
-
-    def insertFromMimeData(self, source) -> None:
-        path = self._image_file(source) if not source.hasImage() else ""
-        if not source.hasImage() and not path:
-            super().insertFromMimeData(source)
-            return
-        if path:
-            reader = QImageReader(path)
-            reader.setAutoTransform(True)
-            image = reader.read()
-        else:
-            image = source.imageData()
-            if isinstance(image, QPixmap):
-                image = image.toImage()
-        if not isinstance(image, QImage) or image.isNull():
-            self.image_rejected.emit("无法读取图片，请重新复制图片或检查文件是否损坏")
-            return
-        if image.hasAlphaChannel():
-            flattened = QImage(image.size(), QImage.Format_RGB32)
-            flattened.fill(Qt.white)
-            painter = QPainter(flattened)
-            painter.drawImage(0, 0, image)
-            painter.end()
-            image = flattened
-        data = QByteArray()
-        buffer = QBuffer(data)
-        buffer.open(QIODevice.WriteOnly)
-        saved = image.save(buffer, "JPEG", 88)
-        buffer.close()
-        if not saved or not data:
-            self.image_rejected.emit("图片转换失败，请尝试 PNG 或 JPEG 图片")
-            return
-        self.image_pasted.emit(bytes(data))
+from learning_assistant.ui.input_edit import InputEdit
 
 
 class MainWindow(QMainWindow):

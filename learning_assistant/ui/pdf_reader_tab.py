@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -46,7 +45,6 @@ class PdfReaderTab(QWidget):
         self.settings = settings
         self.document_path = ""
         self._phrases: list[PdfPhrase] = []
-        self._waiting_for_first_token = False
         self._closed = False
         self._learning_result_ready = False
         self.phrase_buttons: dict[PdfPhrase, QPushButton] = {}
@@ -56,6 +54,8 @@ class PdfReaderTab(QWidget):
 
     def _build_ui(self) -> None:
         from learning_assistant.ui.pdfjs_view import PdfJsViewAdapter
+        from learning_assistant.ui.pdf_question_window import PdfQuestionWindow
+        from learning_assistant.ui.pdf_translation_panel import PdfTranslationPanel
 
         self.setObjectName("pdfReaderTab")
         root = QVBoxLayout(self)
@@ -73,28 +73,25 @@ class PdfReaderTab(QWidget):
 
         self.translation_panel = QFrame()
         self.translation_panel.setObjectName("translationPanel")
-        right = QVBoxLayout(self.translation_panel)
-        right.setContentsMargins(18, 18, 18, 18)
-        right.setSpacing(10)
+        sidebar = QVBoxLayout(self.translation_panel)
+        sidebar.setContentsMargins(18, 14, 18, 14)
+        sidebar.setSpacing(8)
 
         heading = QHBoxLayout()
-        heading.addWidget(QLabel("选中内容翻译"))
+        heading.addWidget(QLabel("选中内容"))
         heading.addStretch(1)
-        self.status = QLabel("请打开 PDF 并选择句子")
-        self.status.setObjectName("pdfStatus")
-        heading.addWidget(self.status)
-        right.addLayout(heading)
+        self.translate_button = QPushButton("翻译")
+        self.translate_button.setObjectName("primary")
+        heading.addWidget(self.translate_button)
+        sidebar.addLayout(heading)
 
         self.source = QPlainTextEdit()
+        self.source.setObjectName("pdfSelectedText")
         self.source.setReadOnly(True)
-        self.source.setPlaceholderText("选中的原文会显示在这里")
-        self.source.setMaximumHeight(120)
-        right.addWidget(self.source)
-
-        self.translation = QPlainTextEdit()
-        self.translation.setReadOnly(True)
-        self.translation.setPlaceholderText("按 Alt+W 获取快速翻译")
-        right.addWidget(self.translation, 1)
+        self.source.setPlaceholderText("在 PDF 中选择文字")
+        self.source.setMinimumHeight(44)
+        self.source.setMaximumHeight(76)
+        sidebar.addWidget(self.source)
 
         self.phrase_panel = QFrame()
         self.phrase_panel.setObjectName("phrasePanel")
@@ -103,8 +100,7 @@ class PdfReaderTab(QWidget):
         phrase_layout.addWidget(QLabel("词组分析"))
         phrase_scroll = QScrollArea()
         phrase_scroll.setWidgetResizable(True)
-        phrase_scroll.setMaximumHeight(220)
-        phrase_scroll.setMinimumHeight(100)
+        phrase_scroll.setMinimumHeight(40)
         phrase_scroll.setFrameShape(QFrame.NoFrame)
         self.phrase_list = QWidget()
         self.phrase_list_layout = QVBoxLayout(self.phrase_list)
@@ -113,16 +109,6 @@ class PdfReaderTab(QWidget):
         phrase_scroll.setWidget(self.phrase_list)
         phrase_layout.addWidget(phrase_scroll)
         self.phrase_panel.hide()
-        right.addWidget(self.phrase_panel)
-
-        primary_actions = QHBoxLayout()
-        self.translate_button = QPushButton("翻译  Alt+W")
-        self.translate_button.setObjectName("primary")
-        self.copy_button = QPushButton("复制译文")
-        primary_actions.addWidget(self.translate_button)
-        primary_actions.addWidget(self.copy_button)
-        primary_actions.addStretch(1)
-        right.addLayout(primary_actions)
 
         mark_actions = QHBoxLayout()
         self.highlight_combo = QComboBox()
@@ -136,21 +122,36 @@ class PdfReaderTab(QWidget):
         self.remove_highlight_button = QPushButton("移除标记")
         # Parent shortcuts to the document tab so hidden tabs cannot handle them,
         # and they also work when the PDF view has keyboard focus.
+        self._translate_shortcut = QShortcut(QKeySequence(), self)
         self._highlight_shortcut = QShortcut(QKeySequence(), self)
         self._remove_highlight_shortcut = QShortcut(QKeySequence(), self)
+        self._question_shortcut = QShortcut(QKeySequence(), self)
+        self._question_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._question_shortcut.setAutoRepeat(False)
+        self._question_shortcut.activated.connect(self.toggle_question)
         for shortcut, button in (
+            (self._translate_shortcut, self.translate_button),
             (self._highlight_shortcut, self.highlight_button),
             (self._remove_highlight_shortcut, self.remove_highlight_button),
         ):
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.setAutoRepeat(False)
             shortcut.activated.connect(button.click)
-        self.reload_shortcuts()
         mark_actions.addWidget(self.highlight_combo)
         mark_actions.addWidget(self.highlight_button)
         mark_actions.addWidget(self.remove_highlight_button)
         mark_actions.addStretch(1)
-        right.addLayout(mark_actions)
+        sidebar.insertLayout(0, mark_actions)
+        self.translation_result = PdfTranslationPanel()
+        self.translation_result.output_layout.setStretchFactor(self.translation_result.answer_browser, 55)
+        self.translation_result.output_layout.addWidget(self.phrase_panel, 45)
+        self.translation = self.translation_result.answer_browser
+        self.status = self.translation_result.status
+        sidebar.addWidget(self.translation_result, 1)
+        self.question_window = PdfQuestionWindow(self.settings, self, self.translate_button.click)
+        self.qa_panel = self.question_window.panel
+        self.qa_panel.citation_requested.connect(self._reveal_question_citation)
+        self.reload_shortcuts()
 
         self.splitter.addWidget(self.translation_panel)
         self._splitter_handle = self.splitter.handle(1)
@@ -178,14 +179,15 @@ class PdfReaderTab(QWidget):
         return super().eventFilter(watched, event)
 
     def _connect(self) -> None:
+        self.translation_result.output_reset.connect(self._reset_translation_actions)
+        self.translation_result.clear_button.clicked.connect(self._cancel_translation)
         self.translate_button.clicked.connect(self.translate_active_selection)
-        self.copy_button.clicked.connect(self._copy_translation)
         self.highlight_button.clicked.connect(self._add_highlight)
         self.remove_highlight_button.clicked.connect(self._remove_highlight)
         self.pdf_view.selection_changed.connect(self._selection_changed)
         self.pdf_view.document_loaded.connect(self._document_loaded)
-        self.pdf_view.load_failed.connect(self.status.setText)
-        self.pdf_view.selection_feedback.connect(self.status.setText)
+        self.pdf_view.load_failed.connect(self._set_status)
+        self.pdf_view.selection_feedback.connect(self._set_status)
         self.controller.translation_started.connect(self._translation_started)
         self.controller.translation_partial.connect(self._translation_partial)
         self.controller.phrase_ready.connect(self._phrase_ready)
@@ -196,10 +198,12 @@ class PdfReaderTab(QWidget):
         self.controller.annotations_changed.connect(self.pdf_view.set_annotations)
         self.controller.selection_changed.connect(self._apply_selection)
         self.controller.learning_changed.connect(self._refresh_learning_buttons)
-        self.controller.learning_failed.connect(self.status.setText)
+        self.controller.learning_failed.connect(self._set_status)
 
     def reload_shortcuts(self) -> None:
         for key, shortcut, button, label in (
+            ("selection_hotkey", self._translate_shortcut,
+             self.translate_button, "翻译选中文字"),
             ("pdf_highlight_hotkey", self._highlight_shortcut,
              self.highlight_button, "标记选中文字"),
             ("pdf_remove_highlight_hotkey", self._remove_highlight_shortcut,
@@ -214,19 +218,45 @@ class PdfReaderTab(QWidget):
             # The recorder uses Windows labels; Qt calls the Win modifier Meta.
             shortcut.setKey(QKeySequence(binding.replace("Win+", "Meta+")))
             button.setToolTip(f"{label}（{binding}）")
+        try:
+            question = GlobalHotkeyService.format_binding(str(self.settings.get("pdf_question_hotkey", "alt+a")))
+        except ValueError:
+            question = "Alt+A"
+        self._question_shortcut.setKey(QKeySequence(question.replace("Win+", "Meta+")))
+        self.question_window.set_bindings(question, self._translate_shortcut.key().toString().replace("Meta+", "Win+"))
+
+    def toggle_question(self) -> None:
+        if self._closed:
+            return
+        if self.question_window.isVisible():
+            self.question_window.hide()
+        else:
+            self.question_window.set_document_title(self.document_path)
+            self.question_window.show_front()
+
+    def _reveal_question_citation(self, page_index: int, quote: str) -> None:
+        self.question_window.hide()
+        self.window().raise_()
+        self.window().activateWindow()
+        self.pdf_view.setFocus()
+        self.pdf_view.reveal_citation(page_index, quote)
 
     def load_file(self, path: str | Path) -> bool:
         resolved = str(Path(path).resolve())
         if not self.pdf_view.load_file(resolved):
             return False
         self.document_path = resolved
-        self.status.setText("拖动选择句子，然后按 Alt+W")
+        self.question_window.set_document_title(resolved)
+        self.qa_panel.set_document("", "")
+        self._set_status("")
         return True
 
     def close_session(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self.question_window.dispose()
+        self.translation_result.dispose()
         self.pdf_view.close_document()
         self.controller.dispose()
 
@@ -234,6 +264,8 @@ class PdfReaderTab(QWidget):
         theme = theme if theme in READING_THEMES else "eye_care"
         color = READING_THEMES[theme]
         self.pdf_view.set_reading_theme(theme)
+        self.question_window.set_reading_color(color)
+        self.translation.set_reading_color(color)
         self.setStyleSheet(
             f"""
             QWidget#pdfReaderTab {{ background: {color}; color: #1f2937; }}
@@ -249,6 +281,18 @@ class PdfReaderTab(QWidget):
                 border: 1px solid rgba(107, 114, 128, 35);
                 border-radius: 8px;
             }}
+            QFrame#pdfOutput {{
+                background: rgba(255, 255, 255, 140);
+                border: 1px solid rgba(107, 114, 128, 35);
+                border-radius: 8px;
+            }}
+            QPlainTextEdit#pdfSelectedText,
+            QPlainTextEdit#pdfQuestionInput {{
+                background: rgba(255, 255, 255, 140);
+                border: 1px solid rgba(107, 114, 128, 35);
+                border-radius: 8px;
+                padding: 7px;
+            }}
             QWidget#pdfReaderTab QLabel#pdfStatus {{ color: #6b7280; }}
             """
         )
@@ -256,23 +300,24 @@ class PdfReaderTab(QWidget):
     def _document_loaded(self, document_key: str, _page_count: int) -> None:
         self.controller.set_selection(None, document_key)
         self.pdf_view.set_annotations(self.controller.annotations())
+        self.qa_panel.set_document(self.document_path, document_key, _page_count)
 
     def _selection_changed(self, selection) -> None:
         self.controller.set_selection(selection, self.pdf_view.document_key)
 
     def _apply_selection(self, selection) -> None:
-        self._learning_result_ready = False
-        self._phrases.clear()
-        self._render_phrases()
+        self.qa_panel.set_selection(selection)
+        self.translation_result.clear_translation()
+        self._reset_translation_actions()
         active = selection is not None
         self._set_selection_actions_enabled(active)
         if not active:
             self.source.clear()
-            self.status.setText("请拖动选择一段文字")
+            self._set_status("请拖动选择一段文字")
             return
         self._set_selection_actions_enabled(True, selection.can_annotate)
         self.source.setPlainText(selection.text)
-        self.status.setText(
+        self._set_status(
             "已选择 · 按 Alt+W 翻译"
             if selection.can_annotate
             else "已选择 · 可翻译，跨页选区暂不支持标记"
@@ -293,30 +338,36 @@ class PdfReaderTab(QWidget):
         ):
             widget.setEnabled(marking_enabled)
 
+    def _reset_translation_actions(self) -> None:
+        self._learning_result_ready = False
+        self._phrases.clear()
+        self._render_phrases()
+
+    def _cancel_translation(self) -> None:
+        self.controller.cancel()
+
     def has_active_selection(self) -> bool:
         return self.controller.selection is not None
 
     def translate_active_selection(self) -> None:
         self.controller.translate_selection()
 
+    def _set_status(self, message: str) -> None:
+        self.status.setText(message)
+        routine = ("已选择 · 按", "请拖动", "翻译完成", "标记已移除", "已加入学习")
+        self.status.setVisible(bool(message) and not message.startswith(routine))
+
     def _translation_started(self, source: str) -> None:
         self.source.setPlainText(source)
-        self.translation.setPlainText("正在翻译…")
-        self._waiting_for_first_token = True
+        self.translation_result.start_translation()
         self._phrases.clear()
         self._learning_result_ready = False
         self._render_phrases()
-        self.status.setText("正在翻译…")
+        self._set_status("")
 
     def _translation_partial(self, text: str) -> None:
-        if self._waiting_for_first_token:
-            self.translation.clear()
-            self._waiting_for_first_token = False
-        cursor = self.translation.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(text)
-        self.translation.setTextCursor(cursor)
-        self.status.setText("正在接收译文…")
+        self.translation_result.append_translation(text)
+        self._set_status("")
 
     def _phrase_ready(self, phrase: PdfPhrase) -> None:
         if phrase not in self._phrases:
@@ -363,25 +414,22 @@ class PdfReaderTab(QWidget):
             return
         if self.controller.add_phrase_to_learning(phrase, self.document_path):
             self._refresh_learning_buttons()
-            self.status.setText("已加入学习 · 可在复习中返回来源 PDF")
+            self._set_status("已加入学习 · 可在复习中返回来源 PDF")
 
     def _translation_completed(
         self, result: PdfTranslationResult, cache_hit: bool
     ) -> None:
-        self.translation.setPlainText(result.translation)
-        self._waiting_for_first_token = False
+        self.translation_result.finish_translation(result.translation)
         self._phrases = list(result.phrases)
         self._learning_result_ready = True
         self._render_phrases()
-        self.status.setText("翻译完成 · 缓存" if cache_hit else "翻译完成")
+        self._set_status("翻译完成 · 缓存" if cache_hit else "翻译完成")
 
     def _translation_failed(self, message: str) -> None:
-        if self._waiting_for_first_token:
-            self.translation.clear()
-        self._waiting_for_first_token = False
+        self.translation_result.fail_translation(message)
         self._learning_result_ready = False
         self._refresh_learning_buttons()
-        self.status.setText(message)
+        self._set_status("")
 
     def _add_highlight(self) -> None:
         color = str(self.highlight_combo.currentData() or "yellow")
@@ -390,16 +438,6 @@ class PdfReaderTab(QWidget):
     def _remove_highlight(self) -> None:
         if self.controller.delete_highlight():
             self.pdf_view.clear_selection()
-            self.status.setText("标记已移除")
+            self._set_status("标记已移除")
             return
-        self.status.setText("当前选区没有可移除的标记")
-
-    def _copy_translation(self) -> None:
-        text = self.translation.toPlainText().strip()
-        if text:
-            QApplication.clipboard().setText(text)
-            self.status.setText("译文已复制")
-
-    @staticmethod
-    def clipboard_text() -> str:
-        return QApplication.clipboard().text()
+        self._set_status("当前选区没有可移除的标记")

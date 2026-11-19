@@ -20,7 +20,7 @@ from learning_assistant.services.pdf_text import PdfTranslationStreamParser
 from learning_assistant.services.model_providers import api_endpoint
 
 
-PDF_PROMPT_VERSION = "pdf-selection-v1.0"
+PDF_PROMPT_VERSION = "pdf-selection-v1.1"
 
 
 @dataclass(slots=True)
@@ -55,7 +55,9 @@ class QtPdfTranslationClient(QObject):
     ) -> dict:
         system = (
             "You are a fast, precise translation assistant. Output the natural target-language "
-            "translation first, with no label or commentary. After the translation, output the "
+            "translation first, with no label or commentary. "
+            r"Preserve mathematical notation using LaTeX \(...\) inline or \[...\] for display equations. "
+            "After the translation, output the "
             "exact delimiter <<<PHRASES>>> on its own line. Then output at most 5 genuinely useful "
             "phrases, one per line, as: source phrase || target-language meaning. Do not add grammar "
             "lessons, headings, numbering, paths, or any other content."

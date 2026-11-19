@@ -69,6 +69,7 @@ class PdfReaderWindow(QMainWindow):
         self._focus_escape_shortcut.activated.connect(self.exit_focus_mode)
         self._load_pdf_preferences()
         self._sync_empty_state()
+        self.reload_shortcuts()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -93,6 +94,8 @@ class PdfReaderWindow(QMainWindow):
         self.review_button.setToolTip("复习从查词与 PDF 中积累的表达")
         self.review_button.clicked.connect(self.review_requested)
         toolbar.addWidget(self.review_button)
+        self.question_button = QPushButton("提问")
+        toolbar.addWidget(self.question_button)
         self.focus_button = QPushButton("专注阅读")
         self.focus_button.setObjectName("secondary")
         toolbar.addWidget(self.focus_button)
@@ -152,6 +155,7 @@ class PdfReaderWindow(QMainWindow):
         self.setCentralWidget(central)
 
     def _connect(self) -> None:
+        self.question_button.clicked.connect(self.toggle_question)
         self.open_button.clicked.connect(lambda: self.open_files())
         self.empty_open_button.clicked.connect(lambda: self.open_files())
         self.compact_button.clicked.connect(self.compact_mode_requested)
@@ -248,6 +252,17 @@ class PdfReaderWindow(QMainWindow):
             tab = self.tab_widget.widget(index)
             if isinstance(tab, PdfReaderTab):
                 tab.reload_shortcuts()
+        from learning_assistant.services.selection import GlobalHotkeyService
+        try:
+            binding = GlobalHotkeyService.format_binding(str(self.settings.get("pdf_question_hotkey", "Alt+A")))
+        except ValueError:
+            binding = "Alt+A"
+        self.question_button.setToolTip(f"PDF 问答（{binding}）")
+
+    def toggle_question(self) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.toggle_question()
 
     def close_tab(self, index: int) -> None:
         widget = self.tab_widget.widget(index)
@@ -273,6 +288,7 @@ class PdfReaderWindow(QMainWindow):
             self.zoom_in_button,
             self.fit_width_button,
             self.focus_button,
+            self.question_button,
         ):
             control.setEnabled(has_tabs)
         if not has_tabs:
@@ -280,6 +296,10 @@ class PdfReaderWindow(QMainWindow):
 
     def _current_changed(self, _index: int) -> None:
         tab = self.current_tab()
+        for index in range(self.tab_widget.count()):
+            other = self.tab_widget.widget(index)
+            if isinstance(other, PdfReaderTab) and other is not tab:
+                other.question_window.hide()
         if tab is not None:
             self._zoom_changed(tab.pdf_view.zoomFactor())
 
@@ -383,3 +403,10 @@ class PdfReaderWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         event.ignore()
         self.hide()
+
+    def hideEvent(self, event) -> None:
+        for index in range(self.tab_widget.count()):
+            tab = self.tab_widget.widget(index)
+            if isinstance(tab, PdfReaderTab):
+                tab.question_window.hide()
+        super().hideEvent(event)

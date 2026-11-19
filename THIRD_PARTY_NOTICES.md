@@ -18,3 +18,13 @@ Source: https://github.com/mozilla/pdf.js/releases/tag/v6.2.108
 The upstream license is included at
 `assets/pdfjs-6.2.108-legacy/LICENSE`.
 
+## MathJax
+
+The PDF translation and question interfaces include MathJax 3.2.2 for local
+LaTeX rendering, distributed under the Apache License 2.0.
+
+Source: https://www.npmjs.com/package/mathjax/v/3.2.2
+
+The upstream license and asset provenance are included at
+`assets/mathjax-3.2.2/LICENSE` and `assets/mathjax-3.2.2/PROVENANCE.md`.
+

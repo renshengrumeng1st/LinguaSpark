@@ -89,8 +89,9 @@ def test_highlight_shortcuts_follow_active_tab_and_selection(qtbot, tmp_path):
     qtbot.addWidget(tabs)
     tabs.addTab(tab, "First")
     tabs.addTab(other, "Second")
-    tabs.show()
-    tabs.activateWindow()
+    with qtbot.waitActive(tabs):
+        tabs.show()
+        tabs.activateWindow()
     tab.pdf_view.setFocus()
     qtbot.waitUntil(lambda: tab.pdf_view.hasFocus())
     key_target = tab.pdf_view.focusProxy() or tab.pdf_view
@@ -129,8 +130,9 @@ def test_saved_pdf_hotkeys_reload_open_tabs_when_settings_close(qtbot, tmp_path,
     qtbot.addWidget(window)
     window.tab_widget.addTab(tab, "Open PDF")
     window._sync_empty_state()
-    window.show()
-    window.activateWindow()
+    with qtbot.waitActive(window):
+        window.show()
+        window.activateWindow()
     tab.source.setFocus()
     qtbot.waitUntil(lambda: tab.source.hasFocus())
     # Only the OS-wide registration boundary is replaced; PDF shortcuts are real.
